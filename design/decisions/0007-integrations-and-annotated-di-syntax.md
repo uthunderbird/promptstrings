@@ -45,25 +45,26 @@ def greet(user: Annotated[User, PromptDepends(get_user)]) -> None:
 `Annotated` carries the resolver as metadata on the type, leaving the default slot
 free and giving type checkers an unambiguous `user: User`.
 
-### Integration design (from /swarm session, 2026-04-27)
+### Integration design (from /swarm sessions, 2026-04-27)
 
 Two integrations were designed:
 
-**`promptstrings[dishka]`** — `DishkaPromptContext` as a drop-in subclass of
-`PromptContext`. Parameters are pre-resolved from a dishka `AsyncContainer` via
-`DishkaPromptContext.resolve(fn, container)`, which uses `declared_parameters` for
-parameter names and `get_type_hints(fn, include_extras=True)` for annotation access,
-calling `container.get(bare_type)` for each parameter not already in `values` (where
-`bare_type` is the first argument to `Annotated[T, ...]` for `Annotated` types, or the
-annotation itself for plain non-`Annotated` types). Dishka
-resolves plain type annotations and dishka `Inject()` markers; parameters carrying
-`PromptDepends` or `AwaitPromptDepends` in `Annotated` metadata are skipped by
-`resolve()` and handled by `_resolve_dependencies` as usual.
+**`promptstrings[dishka]`** — `DishkaContext` as a drop-in subclass of `PromptContext`
+paired with a `From(type_)` helper. `DishkaContext` carries a typed `container` field
+and hides it in `extras` under a private key via `__post_init__`. `From(type_)` returns
+an `AwaitPromptDepends` resolver that reads the container from `extras` using the same
+private key. The two are inseparable: `From()` without `DishkaContext` leaks the key;
+`DishkaContext` without `From()` gives no DX benefit. No pre-resolve step — dishka
+resolvers run inside the standard `_resolve_dependencies` gather pass. This pattern is
+symmetric across DI frameworks: `promptstrings[fastdepends]` would expose
+`FastDependsContext + Inject(type_)` with an identical structure.
 
 **`promptstrings[pydantic]`** — `PydanticPromptContext` as a drop-in subclass of
 `PromptContext`. A `from_model(model, *, dump_mode='python')` classmethod populates
-`values` from `model.model_dump(mode=dump_mode)`. `ValidationError` is not wrapped
-into `PromptRenderError` — it is a construction-time error, not a render-time error.
+`values` from `model.model_dump(mode=dump_mode)`. Requires **Pydantic v2 only** —
+`model_dump()` and `model_dump(mode='json')` are v2 APIs; Pydantic v1's `.dict()` is
+not supported and will not be. `ValidationError` is not wrapped into `PromptRenderError`
+— it is a construction-time error, not a render-time error.
 
 ## Decision
 
@@ -136,99 +137,107 @@ gather optimization is not broken by the Annotated syntax path.
 **Public documentation** shows only the `Annotated` form. The default-value form
 is preserved for internal continuity.
 
-### D2 — `DishkaPromptContext` subclass with `resolve()` classmethod
+### D2 — `DishkaContext` + `From()` integration
 
-**Implementation ordering constraint:** D2 may not be implemented until D1 is complete
-and T1–T7 pass. `DishkaPromptContext.resolve()` skips parameters carrying `PromptDepends`
-or `AwaitPromptDepends` in `Annotated` metadata, delegating them to `_resolve_dependencies`
-via the Annotated path. This skip logic depends on D1's Annotated resolution being correct.
-If D1 is partially broken, D2 will either double-resolve parameters or miss them entirely,
-with no warning at definition time.
-
-`DishkaPromptContext` is a `frozen=True` dataclass subclass of `PromptContext`:
+Each DI-framework extra exposes exactly two symbols: a typed context subclass and a
+resolver factory. They are inseparable — the context hides the private key, the factory
+reads it. This pattern is symmetric across all DI-framework extras.
 
 ```python
+# src/promptstrings/integrations/dishka.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, TypeVar
+from dishka import AsyncContainer
+from promptstrings import PromptContext, AwaitPromptDepends
+
+T = TypeVar('T')
+
+_CONTAINER_KEY = '_promptstrings_dishka_container'  # private, not exported
+
+
 @dataclass(frozen=True)
-class DishkaPromptContext(PromptContext):
-    container: AsyncContainer | Container | None = None
+class DishkaContext(PromptContext):
+    """PromptContext carrying a dishka AsyncContainer.
 
-    @classmethod
-    async def resolve(
-        cls,
-        fn: Promptstring,
-        container: AsyncContainer,
-        *,
-        values: dict[str, Any] | None = None,
-        extras: dict[str, Any] | None = None,
-    ) -> DishkaPromptContext:
-        ...
+    Pass this instead of PromptContext when using dishka for DI.
+    Use From(SomeType) in Annotated markers to resolve from the container.
+    """
+    container: AsyncContainer | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'extras', {**self.extras, _CONTAINER_KEY: self.container})
+
+
+def From(type_: type[T]) -> AwaitPromptDepends:
+    """Resolve a parameter from the active dishka container.
+
+    Usage: Annotated[SomeType, From(SomeType)]
+    Requires the render context to be a DishkaContext; raises KeyError otherwise.
+    """
+    async def resolver(ctx: PromptContext) -> T:
+        container: AsyncContainer = ctx.extras[_CONTAINER_KEY]
+        return await container.get(type_)
+    return AwaitPromptDepends(resolver)
 ```
-
-`resolve()` uses `fn.declared_parameters` (where `fn` is a `Promptstring`-Protocol
-object — the decorated wrapper, not the raw callable) for parameter names and presence only.
-It calls `get_type_hints(fn, include_extras=True)` independently to access annotations
-and `Annotated` metadata — `inspect.Parameter.annotation` does not surface `Annotated`
-extras under `from __future__ import annotations` (PEP 563 postponed evaluation, as
-used in `core.py`) and must not be used for this purpose. `resolve()` cannot reuse `fn._hints`
-because `_hints` is a private implementation attribute of `_PromptString` and is not
-exposed on the `Promptstring` Protocol; `resolve()` only has access to the Protocol's
-public surface (`declared_parameters`, `render`, etc.). For each parameter not already in
-`values`, `resolve()` reads the hint, skips it if it carries a `PromptDepends` or
-`AwaitPromptDepends` marker (those are handled by `_resolve_dependencies`), honours
-dishka's own `Inject()` marker if present, and otherwise calls
-`await container.get(bare_type)` for plain type annotations.
-
-**`Container` vs `AsyncContainer` error contract:** `DishkaPromptContext.container` is
-typed `AsyncContainer | Container | None` to allow the field to exist on the dataclass,
-but `resolve()` accepts only `AsyncContainer`. If a caller constructs
-`DishkaPromptContext(container=Container(...))` and calls `resolve()`, the mismatch
-surfaces at runtime when `await container.get(...)` is reached — the sync `Container`
-does not support `await`, and the error propagates as `TypeError` or `AttributeError`
-from the dishka internals. No additional wrapping is performed in this release. A
-future version may add an explicit guard with a descriptive `PromptRenderError`. Until
-then, callers must pass an `AsyncContainer` to `resolve()`.
-
-**dishka + Annotated:** when a parameter is `Annotated[User, PromptDepends(...)]`,
-`resolve()` skips it (it will be resolved by `_resolve_dependencies` via the
-`Annotated` path). When a parameter is `Annotated[User, Inject()]` (dishka's own
-marker), `resolve()` honours the dishka marker and calls `container.get(User)`.
-Plain type annotations with no marker → resolved by `container.get(annotation)`.
-
-**`resolve()` construction pattern:** `resolve()` is purely functional. It never
-mutates the incoming `values` dict. It constructs and returns a new
-`DishkaPromptContext` as:
-
-```python
-return cls(
-    values={**(values or {}), **resolved},
-    extras=extras,
-    container=container,
-)
-```
-
-The `values` parameter is a seed — entries already present are preserved unchanged,
-and resolved entries are merged on top. Callers that pass no `values` get a fresh
-instance populated solely by container resolution.
-
-This makes dishka the complete DI layer: container registration replaces all
-`PromptDepends` declarations. `DishkaPromptContext.resolve()` is the single
-call-site.
 
 **DX:**
 
 ```python
+from typing import Annotated
 from promptstrings import promptstring
-from promptstrings.integrations.dishka import DishkaPromptContext
+from promptstrings.integrations.dishka import DishkaContext, From
 
 @promptstring
-def greet(name: str, user: CurrentUser) -> None:
+def greet(
+    name: str,
+    user: Annotated[CurrentUser, From(CurrentUser)],
+) -> None:
     """Hello, {name}. Your role is {user}."""
 
-ctx = await DishkaPromptContext.resolve(greet, container)
+ctx = DishkaContext(values={"name": "Ada"}, container=container)
 text = await greet.render(ctx)
 ```
 
+**How it works:** `From(CurrentUser)` returns an `AwaitPromptDepends` resolver.
+`_resolve_dependencies` picks it up via the standard Annotated path (D1, step 2) and
+collects it into the `asyncio.gather` pass. No pre-resolve step, no `declared_parameters`
+inspection, no `get_type_hints` call in the extra. The extra has zero knowledge of
+`_resolve_dependencies` internals.
+
+**Error behavior:** if `DishkaContext` is not used but `From()` resolvers are present,
+`ctx.extras[_CONTAINER_KEY]` raises `KeyError` at render time with a clear key name.
+No wrapping — the `KeyError` propagates as-is. This is intentional: using `From()`
+without `DishkaContext` is a programming error, not a runtime condition.
+
+**Symmetric pattern for other DI frameworks:**
+
+```python
+# promptstrings[fastdepends] — identical structure, different container API:
+_KEY = '_promptstrings_fastdepends_container'
+
+@dataclass(frozen=True)
+class FastDependsContext(PromptContext):
+    container: object = None
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'extras', {**self.extras, _KEY: self.container})
+
+def Inject(type_: type[T]) -> AwaitPromptDepends:
+    async def resolver(ctx: PromptContext) -> T:
+        return await ctx.extras[_KEY].resolve(type_)
+    return AwaitPromptDepends(resolver)
+```
+
+Each DI-framework extra: one file, two exports (`XxxContext` and a resolver factory),
+one private key constant. Core is unaware of any of them.
+
 ### D3 — `PydanticPromptContext` subclass with `from_model()` classmethod
+
+**Pydantic v2 only.** `PydanticPromptContext` uses `model.model_dump()` and
+`model.model_dump(mode='json')` — both are Pydantic v2 APIs introduced in v2.0.
+Pydantic v1's `.dict()` method is explicitly not supported. The `pyproject.toml` pin
+(`pydantic>=2.0`) enforces this at install time. No compatibility shim for v1 will
+be added.
 
 `PydanticPromptContext` is a `frozen=True` dataclass subclass of `PromptContext`:
 
@@ -250,8 +259,8 @@ class PydanticPromptContext(PromptContext):
 JSON-serializable representations of `datetime`, `UUID`, or `Enum` fields are needed
 in the rendered prompt.
 
-`ValidationError` from Pydantic is not caught or wrapped — it propagates as-is.
-A `TypeError` is raised if the argument is not a `BaseModel` instance.
+`ValidationError` from Pydantic v2 is not caught or wrapped — it propagates as-is.
+A `TypeError` is raised if the argument is not a `pydantic.BaseModel` instance.
 
 **DX:**
 
@@ -289,8 +298,12 @@ Optional extras in `pyproject.toml`:
 ```toml
 [project.optional-dependencies]
 dishka = ["dishka>=1.0"]
-pydantic = ["pydantic>=2.0"]
+pydantic = ["pydantic>=2.0,<3.0"]
 ```
+
+The upper bound `<3.0` on pydantic is intentional — Pydantic v3 may change
+`model_dump()` semantics. When v3 ships, a conscious decision and test pass is
+required before widening the pin.
 
 The integrations are not imported by `promptstrings.__init__` — they must be
 imported explicitly from `promptstrings.integrations.dishka` /
@@ -321,27 +334,39 @@ introduced by this ADR are uncovered without these additions.
 | T5 | Parameter with both `Annotated` metadata and default-value `PromptDepends` resolves via `Annotated` (priority step 1 before step 3) | Priority list ordering | D1 |
 | T6 | `get_type_hints` raises `NameError` at decoration → decoration raises immediately | D1 fail-fast error contract | D1 |
 | T7 | `get_type_hints` raises `AttributeError` at decoration → decoration raises immediately | D1 fail-fast error contract | D1 |
-| T8 | `DishkaPromptContext(container=Container(...)).resolve(...)` propagates `TypeError` or `AttributeError` (no wrapping) | Pins the `Container` vs `AsyncContainer` error surface; detects if dishka changes exception type | D2 |
-| T9 | `PydanticPromptContext.from_model(not_a_BaseModel)` raises `TypeError` | D3 error contract | D3 |
-| T10 | `PydanticPromptContext.from_model(model, dump_mode='json')` serializes `datetime`/`UUID` to strings | D3 known caveat; documents expected serialization behavior | D3 |
+| T8 | `From(SomeType)` resolver called with a plain `PromptContext` (no `DishkaContext`) raises `KeyError` with `_CONTAINER_KEY` in the message | Pins the error behavior for missing container; documents that `From()` without `DishkaContext` is a programming error | D2 |
+| T9 | `DishkaContext.__post_init__` merges container into extras; existing extras entries are preserved | Verifies the `{**self.extras, _KEY: container}` merge is non-destructive | D2 |
+| T10 | `PydanticPromptContext.from_model(not_a_BaseModel)` raises `TypeError` | D3 error contract | D3 |
+| T11 | `PydanticPromptContext.from_model(model, dump_mode='json')` serializes `datetime`/`UUID` to strings | D3 known caveat; documents expected serialization behavior | D3 |
+| T12 | `from pydantic.v1 import BaseModel; PydanticPromptContext.from_model(v1_model)` raises `TypeError` or `AttributeError` | Explicitly guards against Pydantic v1 models being passed to a v2-only API | D3 |
 
-T1–T7 must pass before D2 is written (see implementation ordering constraint in D2).
-T8 pins the current error behavior so that a future dishka version change surfaces
-as a test failure rather than a silent contract break.
+T1–T7 must pass before D2 is written. T12 ensures that Pydantic v1 compat shims
+(e.g. `pydantic.v1` which ships inside Pydantic v2) do not silently work — v1 models
+lack `model_dump()` and the failure must be explicit, not silent.
 
 ## Alternatives Considered
 
-- **`dishka()` wrapper function returning `AwaitPromptDepends`.** Rejected: this
-  reinvents `PromptDepends` with a different name and does not leverage dishka's
-  container registration. The pre-resolve approach gives full dishka DI semantics.
+- **`DishkaPromptContext.resolve(fn, container)` pre-resolve classmethod.** Rejected
+  in favour of `DishkaContext + From()`. Pre-resolve requires `get_type_hints` on
+  `fn` from inside the extra-package boundary (where `fn._hints` is not accessible),
+  walking `declared_parameters` and separately calling `container.get()` for each
+  parameter. This duplicates logic that `_resolve_dependencies` already does, and it
+  cannot reuse the hints cached at decoration time. The `From()` pattern delegates
+  resolution entirely to the existing gather pass with no duplication.
+
+- **Thin `From()` wrapper without a typed context class.** Rejected: without
+  `DishkaContext`, the private `_CONTAINER_KEY` string must appear in user code
+  (`PromptContext(extras={'_promptstrings_dishka_container': container})`), breaking
+  encapsulation and making the key a de-facto public API. Typed context + private key
+  is the correct split.
 
 - **Protocol for `PromptContext` in core.** Rejected: frozen dataclass subclass
   satisfies mypy via LSP without adding a new public symbol to core. Protocol would
   grow over time and create maintenance burden.
 
 - **`dishka` hook in `_resolve_dependencies`.** Rejected: couples core to an
-  optional dependency. Pre-resolve in `DishkaPromptContext.resolve()` keeps core
-  unmodified.
+  optional dependency. `From()` resolvers run inside the standard `AwaitPromptDepends`
+  gather path — core is unaware of dishka.
 
 - **`ValidationError` wrapped into `PromptRenderError`.** Rejected: validation
   happens at model construction time, not at render time. Wrapping would hide the
@@ -362,10 +387,11 @@ as a test failure rather than a silent contract break.
   mypy an unambiguous `User` type at call sites.
 - Consistent with FastAPI, dishka, Pydantic v2 — lower learning curve for users
   familiar with those frameworks.
-- `DishkaPromptContext` enables full dishka DI without any `PromptDepends` in
-  function signatures.
-- `PydanticPromptContext` gives validated, model-driven prompt construction with
-  one import.
+- `DishkaContext + From()` enables full dishka DI with zero pre-resolve step and no
+  `PromptDepends` in function signatures. The pattern is symmetric — any DI framework
+  gets a one-file extra with two exports.
+- `PydanticPromptContext` gives validated, model-driven prompt construction with one
+  import. Pydantic v2-only pin is explicit and enforced at install time.
 - Core is unchanged — zero-dependency guarantee holds.
 - Integration structure (`integrations/`) is a clear extension point for future
   integrations (e.g. `integrations/opentelemetry.py`).
@@ -395,16 +421,24 @@ as a test failure rather than a silent contract break.
   internal users.
 - `integrations/__init__.py` is empty — no re-exports. Each integration is an
   explicit import.
-- `DishkaPromptContext.container` field is typed as `AsyncContainer | Container | None`
-  for flexibility; `resolve()` currently only accepts `AsyncContainer`.
+- `DishkaContext.container` field is typed `AsyncContainer | None`; passing a sync
+  `Container` raises `KeyError` or `AttributeError` inside `From()` resolvers at
+  render time — no compile-time guard.
+- Pydantic v1 models passed to `PydanticPromptContext.from_model()` raise
+  `AttributeError` (no `model_dump` method) — not a custom error. T12 pins this.
 
 ## Notes
 
-- Integration design session: 2026-04-27, conducted via `/swarm`.
+- Integration design sessions: 2026-04-27, conducted via `/swarm` (two sessions —
+  initial design and DI architecture revision).
 - `Annotated` syntax requires Python 3.11+ for `get_type_hints(include_extras=True)`
   — already satisfied by the `>=3.14` requirement.
-- dishka's `Inject()` marker in `Annotated` metadata: `DishkaPromptContext.resolve()`
-  should check for it explicitly rather than treating all `Annotated` metadata as
-  dishka markers.
-- Future: `integrations/opentelemetry.py` could add a `PromptContext` subclass that
-  carries a tracer span in `extras` and an `Observer` that emits spans.
+- The `DishkaContext + From()` pattern was chosen over `DishkaContext.resolve(fn,
+  container)` after the second design session concluded that pre-resolve duplicates
+  `_resolve_dependencies` logic and cannot reuse `fn._hints` across the extra boundary.
+- Pydantic v2 pin rationale: `model_dump()` / `model_dump(mode='json')` are v2-only
+  APIs. Pydantic v1 shipped inside Pydantic v2 as `pydantic.v1`; T12 guards against
+  v1 compat models being silently accepted.
+- Future: `integrations/opentelemetry.py` could expose an `OtelContext` subclass
+  carrying a tracer span in `extras` and an `Observer` that emits spans — identical
+  pattern to `DishkaContext`.
