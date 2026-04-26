@@ -99,6 +99,24 @@ def conversation(topic: str):
     yield f"Tell me about {topic}."
 ```
 
+**Join semantics:** `render()` joins multiple messages with `"\n\n"` (double
+newline). Within a single message, consecutive string yields are joined with
+`"\n"`. Use `render_messages()` to get individual `PromptMessage` objects and
+join them yourself.
+
+## Type annotations
+
+Use the `Promptstring` Protocol to annotate prompt objects in function
+signatures — it is stable across 1.x and does not expose internal classes:
+
+```python
+from promptstrings import Promptstring, PromptContext
+
+async def call_llm(prompt: Promptstring, ctx: PromptContext) -> str:
+    messages = await prompt.render_messages(ctx)
+    ...
+```
+
 ## Dynamic templates (t-strings)
 
 For prompts built at runtime — for example, from a function argument or
@@ -169,6 +187,32 @@ def static_prompt() -> PromptSource:
         content="You are a helpful assistant.",
         provenance=PromptSourceProvenance(source_id="assistant-v1"),
     )
+```
+
+## Observers
+
+`Promptstrings` is a configuration carrier that attaches a shared `Observer`
+to multiple prompt functions. Observers receive `RenderStartEvent`,
+`RenderEndEvent`, and `RenderErrorEvent` objects for every render call — useful
+for logging, metrics, and tracing.
+
+```python
+from promptstrings import Promptstrings, Observer, RenderStartEvent, RenderEndEvent, RenderErrorEvent
+
+class LogObserver:
+    def on_event(self, event: RenderStartEvent | RenderEndEvent | RenderErrorEvent) -> None:
+        print(f"[{type(event).__name__}] {event.prompt_name}")
+
+ps = Promptstrings(observer=LogObserver())
+
+@ps.promptstring
+def greet(name: str) -> None:
+    """Hello, {name}."""
+
+@ps.promptstring_generator
+def chat(topic: str):
+    yield Role("system")
+    yield f"You are an expert on {topic}."
 ```
 
 ## Stability
