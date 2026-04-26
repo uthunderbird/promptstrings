@@ -24,3 +24,27 @@ This folder is the escape valve. Without it, exploratory thoughts pollute
 ## Index
 
 <!-- Optional. Don't feel obligated to keep this current. -->
+
+### Red-team critique artifacts (2026-04-26)
+
+These were produced during iterative critique cycles on the proposals
+and on VISION. They are durable trace, not load-bearing for current
+decisions; consult them only if you need to know *why* a finding was
+fixed a particular way.
+
+**On the proposals (3-round cycle on api-1.0-baseline.md and
+api-1.0-integrations.md):**
+- [`red-team-round-1-contract-completeness.md`](red-team-round-1-contract-completeness.md)
+- [`red-team-round-2-execution-and-rollback.md`](red-team-round-2-execution-and-rollback.md)
+- [`red-team-round-3-wording-and-legibility.md`](red-team-round-3-wording-and-legibility.md)
+
+**Cross-document audit (between baseline and integrations):**
+- [`red-team-cross-doc-consistency-audit.md`](red-team-cross-doc-consistency-audit.md)
+
+**On VISION (3-round cycle on VISION.md):**
+- [`red-team-vision-round-1-argumentative-integrity.md`](red-team-vision-round-1-argumentative-integrity.md)
+- [`red-team-vision-round-2-consistency.md`](red-team-vision-round-2-consistency.md)
+- [`red-team-vision-round-3-reader-experience.md`](red-team-vision-round-3-reader-experience.md)
+
+**Corpus-level audit (the entire `design/` tree):**
+- [`red-team-corpus-integrated-audit.md`](red-team-corpus-integrated-audit.md)

@@ -1,11 +1,35 @@
+---
+title: Glossary
+status: living
+created: 2026-04-26
+updated: 2026-04-26
+---
+
 # Glossary
 
 Shared vocabulary for design discussions about `promptstrings`. When a
 term in this glossary appears in a design doc, it means *this specific
 thing*, not the generic English usage.
 
+## Selection criterion
+
+This glossary defines **design-conversation vocabulary** — concepts
+load-bearing across multiple design docs that benefit from a single
+shared definition.
+
+It does **not** duplicate API contract symbols. Public exception
+classes (`PromptRenderError`, `PromptStrictnessError`,
+`PromptUnusedParameterError`, `PromptUnreferencedParameterError`,
+`PromptCompileError`), event types (`RenderStartEvent`,
+`RenderEndEvent`, `RenderErrorEvent`), and other API surfaces are
+defined canonically in
+[`proposals/api-1.0-baseline.md`](proposals/api-1.0-baseline.md) and
+[`proposals/api-1.0-integrations.md`](proposals/api-1.0-integrations.md);
+this glossary references them but does not redefine them.
+
 Terms are alphabetical within each section. Add new entries as they
-become load-bearing in conversation; remove entries that fall out of use.
+become load-bearing in conversation; remove entries that fall out of
+use.
 
 ## Library concepts
 
@@ -97,6 +121,24 @@ become load-bearing in conversation; remove entries that fall out of use.
 
 ## DX vocabulary
 
+- **DX rubric** — the falsifiable criteria (R1, R2, …) declared in
+  [`proposals/api-1.0-baseline.md`](proposals/api-1.0-baseline.md)
+  and [`proposals/api-1.0-integrations.md`](proposals/api-1.0-integrations.md)
+  that the library must pass before tagging 1.0. Each rubric criterion
+  is a concrete test, not a vague aspiration.
+
+- **Above-the-fold** — the first section of a long-form doc that a
+  60-second-reader sees without needing to scroll past structural
+  framing. In `VISION.md`, the first three problems form the
+  above-the-fold set: each independently justifies the library, and
+  readers who scan only those three still get an adoption case.
+
+- **Prompt-as-code** — the organizing frame in `VISION.md` that
+  treats prompts as typed, versioned, inspectable, testable objects
+  rather than unstructured strings embedded in logic. The five
+  problems VISION names are framed as symptoms of the
+  prompt-as-string pathology that this frame inverts.
+
 - **Guessability** — the property that an agent or human inventing a
   method or argument name by analogy lands on the actual API. High
   guessability reduces friction asymmetrically more for agents than for
@@ -110,11 +152,6 @@ become load-bearing in conversation; remove entries that fall out of use.
   and exceptions exported from the package. "Tightening the surface"
   means removing or hiding things; "broadening the surface" means
   adding.
-
-- **Strictness gradient** — the spectrum from "library tells you nothing
-  is wrong" to "library refuses anything ambiguous." `promptstrings`
-  sits intentionally toward the strict end; design docs should justify
-  any move toward laxness.
 
 - **Promise / non-promise** — a *promise* is a behavior the library
   guarantees across versions per SemVer; a *non-promise* is a behavior

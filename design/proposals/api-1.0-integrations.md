@@ -238,6 +238,17 @@ library does not own any of this; it treats `extras` as opaque.
 > the dataclass shape declared in baseline Promise 4 and the dataclass
 > kept `frozen=True`. No render-path code changes are required because
 > `extras` is invisible to library logic by design.
+>
+> **Local-variable name collision warning.** `core.py` currently uses
+> `extras` as a local variable name in the strict-mode unused-parameter
+> check (lines 191, 211, 280 in current `core.py` — the
+> `extras = sorted(name for name in resolved if name not in compiled.placeholders)`
+> idiom). When `PromptContext.extras` lands as a public field, the
+> implementer MUST rename these locals (recommend `unused_params` or
+> similar) to avoid reader confusion and to prevent any future
+> `from … import extras` from shadowing them. Renaming the locals is
+> independent of and may precede the `PromptContext.extras` field
+> addition.
 
 ## Lifecycle map row deltas
 

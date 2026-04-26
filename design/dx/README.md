@@ -23,7 +23,10 @@ failed render.
 
 <!-- Add entries as docs land. -->
 
-_No DX docs yet._
+- [`integration-patterns.md`](integration-patterns.md) — canonical
+  per-vendor integration patterns (Pydantic, Dishka, fast-depends,
+  OTel, structlog, eval frameworks, prompt-management systems). Draft;
+  currently a stub pointing at the integrations proposal.
 
 ## Out of scope
 

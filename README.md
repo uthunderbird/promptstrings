@@ -110,6 +110,27 @@ field will be attached to every `PromptMessage` produced.
 Pre-1.0. The API is stable in practice (used internally by femtobot) but minor
 breaks may occur before 1.0.
 
+## Design and architecture
+
+The functional vision and 1.0 contract are documented under
+[`design/`](design/). Start here:
+
+- **[`design/VISION.md`](design/VISION.md)** — single source of truth for
+  *why* the library exists: the problems it solves and how its developer
+  experience answers them. Updated in place, versioned via
+  `vision_version`.
+- **[`design/proposals/api-1.0-baseline.md`](design/proposals/api-1.0-baseline.md)**
+  — the SemVer contract (promises, non-promises, lifecycle map, DX
+  rubric).
+- **[`design/proposals/api-1.0-integrations.md`](design/proposals/api-1.0-integrations.md)**
+  — extension surface for 1.0: `Promptstrings` configuration carrier,
+  `Observer` Protocol, `PromptContext.extras`, and per-vendor adapter
+  patterns.
+- **[`design/glossary.md`](design/glossary.md)** — canonical
+  vocabulary used across all design docs.
+- **[`design/README.md`](design/README.md)** — directory map and
+  conventions for adding decisions, proposals, and DX deep-dives.
+
 ## License
 
 MIT.

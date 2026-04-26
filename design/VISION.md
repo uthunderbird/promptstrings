@@ -434,8 +434,9 @@ This VISION is the apex of the design hierarchy:
     proposals/api-1.0-integrations.md  — the extension surface
             │
             ▼
-    decisions/0001-…                   — accepted decisions (ADRs)
-    decisions/0002-…                     when proposals are promoted
+    decisions/                         — accepted ADRs (none yet;
+                                         populated when proposals are
+                                         promoted, numbered 0001…)
             │
             ▼
     dx/, agent-dx/                     — DX deep-dives per audience

@@ -22,6 +22,10 @@ vocabulary.
 
 ## How to add a doc
 
+- **VISION?** There is exactly one. Don't add another; modify
+  `VISION.md` in place. Bump `vision_version` in the frontmatter on
+  substantive change and append a row to the *Revision history* table
+  at the bottom of the doc summarizing the change.
 - **Decision?** Copy `decisions/0000-template.md`, give it the next number, write it. ADRs are immutable once `Status: Accepted`; supersede with a newer ADR rather than editing.
 - **Proposal?** Drop a kebab-case `.md` into `proposals/`. No number. When accepted, promote to an ADR.
 - **DX or agent-DX deep dive?** Add a kebab-case `.md` to the appropriate folder and link it from that folder's `README.md`.
@@ -29,7 +33,9 @@ vocabulary.
 
 ## Doc states
 
-Every doc that isn't an ADR should carry a frontmatter block:
+Every **content document** (proposals, decisions, dx/agent-dx
+deep-dives, notes, the glossary, VISION) should carry a frontmatter
+block:
 
 ```yaml
 ---
@@ -39,6 +45,12 @@ created: YYYY-MM-DD
 updated: YYYY-MM-DD
 ---
 ```
+
+Directory-organizing `README.md` files (this file and the
+per-subfolder `README.md` files in `proposals/`, `decisions/`, `dx/`,
+`agent-dx/`, `notes/`) do **not** require frontmatter — they are
+index and map documents whose state matches the directory they
+describe, not content artifacts in their own right.
 
 `status: living` is reserved for SSOT documents (currently `VISION.md`)
 that are updated in place rather than superseded. Living docs may also
