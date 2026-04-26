@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Generator strict-mode WARNING log via `promptstrings.strict_heuristic` logger (ADR 0004,
+  non-contract implementation recommendation): emits WARNING at `logging.WARNING` level when
+  a resolved parameter has `str(value) == ""` (guaranteed false negative) or
+  `len(str(value)) <= 1` (elevated false-positive risk). Does not affect strict-mode outcome.
 - Concurrent `AwaitPromptDepends` resolution via `asyncio.gather` (ADR 0001 Promise 9).
   All `AwaitPromptDepends` in a single render now run concurrently; the first exception
   cancels the rest. The at-most-one guard is removed — this is a one-way door.

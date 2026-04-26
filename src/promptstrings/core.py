@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import sys
 import textwrap
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
 from typing import Any, Literal, Protocol, overload, runtime_checkable
+
+_strict_heuristic_logger = logging.getLogger("promptstrings.strict_heuristic")
 
 
 class PromptRenderError(RuntimeError):
@@ -692,6 +695,22 @@ class _PromptStringGenerator:
         flush()
 
         if self._strict:
+            # Warn on values known to produce heuristic failures (ADR 0004, non-contract).
+            for name, value in resolved.items():
+                str_val = str(value)
+                if str_val == "":
+                    _strict_heuristic_logger.warning(
+                        "Parameter %r has an empty str() value; the substring-occurrence "
+                        "check will always report it as used (false negative).",
+                        name,
+                    )
+                elif len(str_val) <= 1:
+                    _strict_heuristic_logger.warning(
+                        "Parameter %r has a single-character str() value %r; the "
+                        "substring-occurrence check has elevated false-positive risk.",
+                        name,
+                        str_val,
+                    )
             used = {
                 name
                 for name, value in resolved.items()

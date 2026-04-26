@@ -406,6 +406,48 @@ def test_prompt_compile_error_at_decoration_time_has_cause_and_optimize_flag() -
 
 
 # ---------------------------------------------------------------------------
+# ADR 0004: generator strict-mode heuristic warning (non-contract)
+# ---------------------------------------------------------------------------
+
+
+def test_generator_strict_mode_warns_for_empty_string_parameter(caplog: pytest.LogCaptureFixture) -> None:
+    """Empty-string parameters in generator strict mode emit a WARNING (ADR 0004, non-contract).
+
+    The logger name promptstrings.strict_heuristic is implementation-defined;
+    this test verifies the informational behavior without asserting it is contractual.
+    """
+    import logging
+
+    @promptstring_generator(strict=True)
+    def prompt(user: str, empty_tag: str = ""):
+        yield f"Hello {user}."
+
+    with caplog.at_level(logging.WARNING, logger="promptstrings.strict_heuristic"):
+        asyncio.run(prompt.render_messages(PromptContext({"user": "Ada", "empty_tag": ""})))
+
+    # At least one WARNING about the empty-string parameter.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("empty_tag" in r.message for r in warnings), (
+        "Expected a WARNING about 'empty_tag' from the strict_heuristic logger"
+    )
+
+
+def test_generator_strict_mode_warns_for_single_char_parameter(caplog: pytest.LogCaptureFixture) -> None:
+    """Single-character str() values emit a WARNING in generator strict mode (ADR 0004, non-contract)."""
+    import logging
+
+    @promptstring_generator(strict=True)
+    def prompt(user: str, flag: str = "Y"):
+        yield f"Hello {user}, flag is {flag}."
+
+    with caplog.at_level(logging.WARNING, logger="promptstrings.strict_heuristic"):
+        asyncio.run(prompt.render_messages(PromptContext({"user": "Ada", "flag": "Y"})))
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("flag" in r.message for r in warnings)
+
+
+# ---------------------------------------------------------------------------
 # Generator form
 # ---------------------------------------------------------------------------
 
