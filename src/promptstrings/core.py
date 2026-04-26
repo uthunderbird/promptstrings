@@ -7,6 +7,7 @@ import inspect
 import logging
 import sys
 import textwrap
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
@@ -259,6 +260,109 @@ class PromptUnreferencedParameterError(PromptStrictnessError):
         }
 
 
+@dataclass(frozen=True)
+class RenderStartEvent:
+    """Emitted exactly once at the start of each render call (ADR 0002 Promise I-2)."""
+
+    prompt_name: str
+    """Name of the decorated function being rendered."""
+
+    placeholders: frozenset[str]
+    """Placeholder set at decoration time."""
+
+    started_at_ns: int
+    """Monotonic timestamp in nanoseconds (time.monotonic_ns())."""
+
+
+@dataclass(frozen=True)
+class RenderEndEvent:
+    """Emitted exactly once at the successful end of each render call (ADR 0002 Promise I-2)."""
+
+    prompt_name: str
+    """Name of the decorated function that completed rendering."""
+
+    elapsed_ns: int
+    """Elapsed nanoseconds from start to end of this render call."""
+
+    message_count: int
+    """Number of PromptMessage objects in the render result."""
+
+    provenance: PromptSourceProvenance | None
+    """Provenance from the rendered source; None if no provenance was supplied."""
+
+
+@dataclass(frozen=True)
+class RenderErrorEvent:
+    """Emitted exactly once when a render call raises (ADR 0002 Promise I-2)."""
+
+    prompt_name: str
+    """Name of the decorated function that raised."""
+
+    elapsed_ns: int
+    """Elapsed nanoseconds from start to the point the error was raised."""
+
+    error: BaseException
+    """The exception that caused the render to fail."""
+
+
+@runtime_checkable
+class Observer(Protocol):
+    """Sync structured-event sink for render lifecycle (ADR 0002 Promise I-2).
+
+    Implementations must be synchronous. Any async work must be scheduled internally.
+    Exceptions raised from observer methods are caught, logged at WARNING via
+    promptstrings.observer, and discarded — render outcome is unaffected.
+    """
+
+    def on_render_start(self, event: RenderStartEvent) -> None:
+        """Called exactly once before any resolver runs."""
+        ...
+
+    def on_render_end(self, event: RenderEndEvent) -> None:
+        """Called exactly once on successful render completion."""
+        ...
+
+    def on_render_error(self, event: RenderErrorEvent) -> None:
+        """Called exactly once when a render call raises, before the exception propagates."""
+        ...
+
+
+_observer_logger = logging.getLogger("promptstrings.observer")
+
+
+class _NoOpObserver:
+    """Default no-op implementation of Observer; used by the default Promptstrings singleton."""
+
+    def on_render_start(self, event: RenderStartEvent) -> None:
+        """No-op."""
+
+    def on_render_end(self, event: RenderEndEvent) -> None:
+        """No-op."""
+
+    def on_render_error(self, event: RenderErrorEvent) -> None:
+        """No-op."""
+
+
+def _fire_observer(observer: Observer | None, event: Any) -> None:
+    """Call the appropriate observer method for event, swallowing and logging exceptions."""
+    if observer is None:
+        return
+    try:
+        if isinstance(event, RenderStartEvent):
+            observer.on_render_start(event)
+        elif isinstance(event, RenderEndEvent):
+            observer.on_render_end(event)
+        elif isinstance(event, RenderErrorEvent):
+            observer.on_render_error(event)
+    except Exception:
+        _observer_logger.warning(
+            "Observer %r raised during %s; exception discarded.",
+            observer,
+            type(event).__name__,
+            exc_info=True,
+        )
+
+
 @runtime_checkable
 class Promptstring(Protocol):
     """Runtime-checkable Protocol for all promptstring objects (ADR 0001 Promise 2).
@@ -331,16 +435,22 @@ class PromptSource:
 
 @dataclass(frozen=True)
 class PromptContext:
-    """Immutable container for values used to resolve prompt parameters."""
+    """Immutable container for values and framework handles used during rendering.
+
+    values: user-supplied parameter values for dependency resolution.
+    extras: framework-supplied handles (DI containers, tracers, etc.); not read
+            by the library. Convention: use leading-underscore keys for framework state.
+    """
 
     values: dict[str, Any] = field(default_factory=dict)
+    extras: Mapping[str, Any] = field(default_factory=dict)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Return the value for key, or default if absent."""
+        """Return the value for key from values, or default if absent."""
         return self.values.get(key, default)
 
     def require(self, key: str) -> Any:
-        """Return the value for key, raising PromptRenderError if absent."""
+        """Return the value for key from values, raising PromptRenderError if absent."""
         if key not in self.values:
             raise PromptRenderError(
                 f"Missing prompt context value: {key}",
@@ -540,10 +650,13 @@ def _normalize_source(docstring: str | None, *, prompt_name: str = "<unknown>") 
 class _PromptString:
     """Compiled promptstring backed by a function body or docstring template."""
 
-    def __init__(self, fn: Callable[..., Any], *, strict: bool = True) -> None:
+    def __init__(
+        self, fn: Callable[..., Any], *, strict: bool = True, observer: Observer | None = None
+    ) -> None:
         """Initialize and eagerly compile the template when possible."""
         self._fn = fn
         self._strict = strict
+        self._observer = observer
         self.__name__ = getattr(fn, "__name__", "promptstring")
         self.__doc__ = getattr(fn, "__doc__", None)
         # Eagerly compile template at decoration time (ADR 0001 Promise 7 and 8).
@@ -591,28 +704,10 @@ class _PromptString:
         # Dynamic source (returned string or PromptSource): compile at render time.
         return _compile_template(source.content, prompt_name=self.__name__)
 
-    async def render(self, context: PromptContext | None = None) -> str:
-        """Render the prompt to a single string."""
-        ctx = context or PromptContext()
-        resolved = await _resolve_dependencies(self._fn, ctx)
-        source, is_docstring_derived = await self._resolve_source(resolved)
-        compiled = self._get_compiled(source, is_docstring_derived=is_docstring_derived)
-        if missing := sorted(name for name in compiled.placeholders if name not in resolved):
-            raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
-        if self._strict:
-            unused_params = sorted(name for name in resolved if name not in compiled.placeholders)
-            if unused_params:
-                raise PromptUnusedParameterError(
-                    "Resolved prompt parameters were not used by the selected source: "
-                    + ", ".join(unused_params),
-                    unused_parameters=tuple(unused_params),
-                    resolved_keys=tuple(sorted(resolved.keys())),
-                )
-        return compiled.render(resolved)
-
-    async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
-        """Render the prompt to a list of PromptMessage objects."""
-        ctx = context or PromptContext()
+    async def _render_messages_impl(
+        self, ctx: PromptContext
+    ) -> list[PromptMessage]:
+        """Core rendering logic shared by render() and render_messages()."""
         resolved = await _resolve_dependencies(self._fn, ctx)
         source, is_docstring_derived = await self._resolve_source(resolved)
         compiled = self._get_compiled(source, is_docstring_derived=is_docstring_derived)
@@ -635,14 +730,87 @@ class _PromptString:
             )
         ]
 
+    async def render(self, context: PromptContext | None = None) -> str:
+        """Render the prompt to a single string, firing Observer events."""
+        ctx = context or PromptContext()
+        started_at = time.monotonic_ns()
+        _fire_observer(
+            self._observer,
+            RenderStartEvent(
+                prompt_name=self.__name__,
+                placeholders=self.placeholders,
+                started_at_ns=started_at,
+            ),
+        )
+        try:
+            messages = await self._render_messages_impl(ctx)
+        except BaseException as exc:
+            _fire_observer(
+                self._observer,
+                RenderErrorEvent(
+                    prompt_name=self.__name__,
+                    elapsed_ns=time.monotonic_ns() - started_at,
+                    error=exc,
+                ),
+            )
+            raise
+        _fire_observer(
+            self._observer,
+            RenderEndEvent(
+                prompt_name=self.__name__,
+                elapsed_ns=time.monotonic_ns() - started_at,
+                message_count=len(messages),
+                provenance=messages[0].source if messages else None,
+            ),
+        )
+        return "\n".join(m.content for m in messages)
+
+    async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
+        """Render the prompt to a list of PromptMessage objects, firing Observer events."""
+        ctx = context or PromptContext()
+        started_at = time.monotonic_ns()
+        _fire_observer(
+            self._observer,
+            RenderStartEvent(
+                prompt_name=self.__name__,
+                placeholders=self.placeholders,
+                started_at_ns=started_at,
+            ),
+        )
+        try:
+            messages = await self._render_messages_impl(ctx)
+        except BaseException as exc:
+            _fire_observer(
+                self._observer,
+                RenderErrorEvent(
+                    prompt_name=self.__name__,
+                    elapsed_ns=time.monotonic_ns() - started_at,
+                    error=exc,
+                ),
+            )
+            raise
+        _fire_observer(
+            self._observer,
+            RenderEndEvent(
+                prompt_name=self.__name__,
+                elapsed_ns=time.monotonic_ns() - started_at,
+                message_count=len(messages),
+                provenance=messages[0].source if messages else None,
+            ),
+        )
+        return messages
+
 
 class _PromptStringGenerator:
     """Generator-based promptstring for multi-message prompts."""
 
-    def __init__(self, fn: Callable[..., Any], *, strict: bool = False) -> None:
+    def __init__(
+        self, fn: Callable[..., Any], *, strict: bool = False, observer: Observer | None = None
+    ) -> None:
         """Initialize the generator promptstring."""
         self._fn = fn
         self._strict = strict
+        self._observer = observer
         self.__name__ = getattr(fn, "__name__", "promptstring_generator")
         self.__doc__ = getattr(fn, "__doc__", None)
         # declared_parameters: immutable at decoration time (ADR 0001 Promise 2).
@@ -655,9 +823,8 @@ class _PromptStringGenerator:
         """Always empty for generator promptstrings (no static template to parse)."""
         return frozenset()
 
-    async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
-        """Render the generator to a list of PromptMessage objects."""
-        ctx = context or PromptContext()
+    async def _render_messages_impl(self, ctx: PromptContext) -> list[PromptMessage]:
+        """Core rendering logic shared by render() and render_messages()."""
         resolved = await _resolve_dependencies(self._fn, ctx)
         generator = self._fn(**resolved)
         if inspect.isasyncgen(generator):
@@ -726,61 +893,148 @@ class _PromptStringGenerator:
                 )
         return messages
 
+    async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
+        """Render the generator to a list of PromptMessage objects, firing Observer events."""
+        ctx = context or PromptContext()
+        started_at = time.monotonic_ns()
+        _fire_observer(
+            self._observer,
+            RenderStartEvent(
+                prompt_name=self.__name__,
+                placeholders=self.placeholders,
+                started_at_ns=started_at,
+            ),
+        )
+        try:
+            messages = await self._render_messages_impl(ctx)
+        except BaseException as exc:
+            _fire_observer(
+                self._observer,
+                RenderErrorEvent(
+                    prompt_name=self.__name__,
+                    elapsed_ns=time.monotonic_ns() - started_at,
+                    error=exc,
+                ),
+            )
+            raise
+        _fire_observer(
+            self._observer,
+            RenderEndEvent(
+                prompt_name=self.__name__,
+                elapsed_ns=time.monotonic_ns() - started_at,
+                message_count=len(messages),
+                provenance=None,
+            ),
+        )
+        return messages
+
     async def render(self, context: PromptContext | None = None) -> str:
-        """Render the generator to a single joined string."""
-        messages = await self.render_messages(context)
+        """Render the generator to a single joined string, firing Observer events."""
+        ctx = context or PromptContext()
+        started_at = time.monotonic_ns()
+        _fire_observer(
+            self._observer,
+            RenderStartEvent(
+                prompt_name=self.__name__,
+                placeholders=self.placeholders,
+                started_at_ns=started_at,
+            ),
+        )
+        try:
+            messages = await self._render_messages_impl(ctx)
+        except BaseException as exc:
+            _fire_observer(
+                self._observer,
+                RenderErrorEvent(
+                    prompt_name=self.__name__,
+                    elapsed_ns=time.monotonic_ns() - started_at,
+                    error=exc,
+                ),
+            )
+            raise
+        _fire_observer(
+            self._observer,
+            RenderEndEvent(
+                prompt_name=self.__name__,
+                elapsed_ns=time.monotonic_ns() - started_at,
+                message_count=len(messages),
+                provenance=None,
+            ),
+        )
         return "\n\n".join(message.content for message in messages)
 
 
-@overload
-def promptstring(
-    fn: Callable[..., Any],
-    *,
-    strict: bool = True,
-) -> _PromptString: ...
+class Promptstrings:
+    """Configuration carrier for cross-cutting concerns (ADR 0002 Promise I-1).
+
+    Module-level @promptstring and @promptstring_generator delegate to a default
+    singleton instance. Construct your own instance when you need a custom observer
+    or future extension hooks.
+
+    All __init__ parameters are keyword-only. New parameters are added additively in
+    minor releases with defaults that preserve current behavior.
+    """
+
+    def __init__(self, *, observer: Observer | None = None) -> None:
+        """Create a Promptstrings instance with an optional observer."""
+        self._observer = observer
+
+    @overload
+    def promptstring(
+        self,
+        fn: Callable[..., Any],
+        *,
+        strict: bool = True,
+    ) -> _PromptString: ...
+
+    @overload
+    def promptstring(
+        self,
+        fn: None = None,
+        *,
+        strict: bool = True,
+    ) -> Callable[[Callable[..., Any]], _PromptString]: ...
+
+    def promptstring(
+        self,
+        fn: Callable[..., Any] | None = None,
+        *,
+        strict: bool = True,
+    ) -> _PromptString | Callable[[Callable[..., Any]], _PromptString]:
+        """Decorator that creates a _PromptString bound to this instance's observer."""
+        if fn is None:
+            return lambda wrapped: _PromptString(wrapped, strict=strict, observer=self._observer)
+        return _PromptString(fn, strict=strict, observer=self._observer)
+
+    @overload
+    def promptstring_generator(
+        self,
+        fn: Callable[..., Iterable[Any]],
+        *,
+        strict: bool = False,
+    ) -> _PromptStringGenerator: ...
+
+    @overload
+    def promptstring_generator(
+        self,
+        fn: None = None,
+        *,
+        strict: bool = False,
+    ) -> Callable[[Callable[..., Iterable[Any]]], _PromptStringGenerator]: ...
+
+    def promptstring_generator(
+        self,
+        fn: Callable[..., Iterable[Any]] | None = None,
+        *,
+        strict: bool = False,
+    ) -> _PromptStringGenerator | Callable[[Callable[..., Iterable[Any]]], _PromptStringGenerator]:
+        """Decorator that creates a _PromptStringGenerator bound to this instance's observer."""
+        if fn is None:
+            return lambda wrapped: _PromptStringGenerator(wrapped, strict=strict, observer=self._observer)
+        return _PromptStringGenerator(fn, strict=strict, observer=self._observer)
 
 
-@overload
-def promptstring(
-    fn: None = None,
-    *,
-    strict: bool = True,
-) -> Callable[[Callable[..., Any]], _PromptString]: ...
-
-
-def promptstring(
-    fn: Callable[..., Any] | None = None,
-    *,
-    strict: bool = True,
-) -> _PromptString | Callable[[Callable[..., Any]], _PromptString]:
-    """Decorator that creates a PromptString from a function with a docstring template."""
-    if fn is None:
-        return lambda wrapped: _PromptString(wrapped, strict=strict)
-    return _PromptString(fn, strict=strict)
-
-
-@overload
-def promptstring_generator(
-    fn: Callable[..., Iterable[Any]],
-    *,
-    strict: bool = False,
-) -> _PromptStringGenerator: ...
-
-
-@overload
-def promptstring_generator(
-    fn: None = None,
-    *,
-    strict: bool = False,
-) -> Callable[[Callable[..., Iterable[Any]]], _PromptStringGenerator]: ...
-
-
-def promptstring_generator(
-    fn: Callable[..., Iterable[Any]] | None = None,
-    *,
-    strict: bool = False,
-) -> _PromptStringGenerator | Callable[[Callable[..., Iterable[Any]]], _PromptStringGenerator]:
-    """Decorator that creates a PromptStringGenerator from a generator function."""
-    if fn is None:
-        return lambda wrapped: _PromptStringGenerator(wrapped, strict=strict)
-    return _PromptStringGenerator(fn, strict=strict)
+# Default singleton — module-level decorators are stable bindings to its methods.
+_default = Promptstrings()
+promptstring = _default.promptstring
+promptstring_generator = _default.promptstring_generator

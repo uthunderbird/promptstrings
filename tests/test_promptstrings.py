@@ -11,6 +11,7 @@ import pytest
 
 from promptstrings import (
     AwaitPromptDepends,
+    Observer,
     PromptCompileError,
     PromptContext,
     PromptDepends,
@@ -20,8 +21,12 @@ from promptstrings import (
     PromptSourceProvenance,
     PromptStrictnessError,
     Promptstring,
+    Promptstrings,
     PromptUnreferencedParameterError,
     PromptUnusedParameterError,
+    RenderEndEvent,
+    RenderErrorEvent,
+    RenderStartEvent,
     Role,
     promptstring,
     promptstring_generator,
@@ -516,3 +521,146 @@ def test_promptstring_resolves_multiple_awaited_dependencies_concurrently() -> N
     assert rendered == "Hello, Ada and Bob!"
     # Both resolvers ran (order not promised per ADR 0001 non-promise 2).
     assert set(resolution_order) == {"first", "second"}
+
+
+# ---------------------------------------------------------------------------
+# ADR 0002 integration seams (R11-R16)
+# ---------------------------------------------------------------------------
+
+
+class _SpyObserver:
+    """Test spy for observer event capture."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def on_render_start(self, event: RenderStartEvent) -> None:
+        self.calls.append(event)
+
+    def on_render_end(self, event: RenderEndEvent) -> None:
+        self.calls.append(event)
+
+    def on_render_error(self, event: RenderErrorEvent) -> None:
+        self.calls.append(event)
+
+
+def test_module_level_promptstring_does_not_use_custom_observer() -> None:
+    """Module-level @promptstring uses default singleton observer, not any custom one (R11)."""
+    spy = _SpyObserver()
+    Promptstrings(observer=spy)  # construct but don't use for decoration
+
+    @promptstring
+    def ps(name: str) -> None:
+        """Hello, {name}."""
+
+    asyncio.run(ps.render(PromptContext({"name": "Ada"})))
+    # spy should have seen zero calls because ps was decorated against the default singleton.
+    assert len(spy.calls) == 0
+
+
+def test_custom_promptstrings_observer_fires_start_then_end(  ) -> None:
+    """Decorating via Promptstrings(observer=spy) fires start then end events in order (R12)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    @lib.promptstring
+    def ps(name: str) -> None:
+        """Hello, {name}."""
+
+    asyncio.run(ps.render(PromptContext({"name": "Ada"})))
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderEndEvent)
+    start = spy.calls[0]
+    end = spy.calls[1]
+    assert isinstance(start, RenderStartEvent)
+    assert isinstance(end, RenderEndEvent)
+    assert start.prompt_name == "ps"
+    assert end.elapsed_ns > 0
+
+
+def test_custom_promptstrings_observer_fires_start_then_error_on_failure() -> None:
+    """Observer fires start then error when render raises (R12)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    @lib.promptstring
+    def ps(name: str, unused: str = "x") -> None:
+        """Hello, {name}."""
+
+    with pytest.raises(PromptUnusedParameterError):
+        asyncio.run(ps.render(PromptContext({"name": "Ada", "unused": "x"})))
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderErrorEvent)
+    err = spy.calls[1]
+    assert isinstance(err, RenderErrorEvent)
+    assert isinstance(err.error, PromptUnusedParameterError)
+
+
+def test_observer_exception_is_logged_and_render_succeeds() -> None:
+    """Observer exceptions are caught, logged at WARNING via promptstrings.observer, discarded (R13)."""
+    import logging
+
+    class _RaisingObserver:
+        def on_render_start(self, event: RenderStartEvent) -> None:
+            raise RuntimeError("observer bug!")
+
+        def on_render_end(self, event: RenderEndEvent) -> None:
+            pass
+
+        def on_render_error(self, event: RenderErrorEvent) -> None:
+            pass
+
+    lib = Promptstrings(observer=_RaisingObserver())
+
+    @lib.promptstring
+    def ps(name: str) -> None:
+        """Hello, {name}."""
+
+    log_records: list[logging.LogRecord] = []
+
+    class _CapHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(record)
+
+    cap = _CapHandler()
+    logging.getLogger("promptstrings.observer").addHandler(cap)
+    try:
+        result = asyncio.run(ps.render(PromptContext({"name": "Ada"})))
+        assert result == "Hello, Ada."
+        warnings = [r for r in log_records if r.levelno == logging.WARNING]
+        assert len(warnings) >= 1
+    finally:
+        logging.getLogger("promptstrings.observer").removeHandler(cap)
+
+
+def test_prompt_context_extras_does_not_affect_resolution() -> None:
+    """PromptContext.extras has no effect on dependency resolution (R14)."""
+
+    @promptstring
+    def ps(name=PromptDepends(lambda ctx: ctx.require("name"))) -> None:
+        """Hello, {name}."""
+
+    ctx = PromptContext(values={"name": "Ada"}, extras={"_dishka": object()})
+    rendered = asyncio.run(ps.render(ctx))
+    assert rendered == "Hello, Ada."
+
+
+def test_observer_protocol_is_runtime_checkable() -> None:
+    """Observer is @runtime_checkable (R15)."""
+    spy = _SpyObserver()
+    assert isinstance(spy, Observer)
+
+
+def test_render_event_dataclasses_are_frozen() -> None:
+    """All Observer event dataclasses are frozen=True (R16)."""
+    import dataclasses
+
+    start = RenderStartEvent(prompt_name="p", placeholders=frozenset(), started_at_ns=0)
+    end = RenderEndEvent(prompt_name="p", elapsed_ns=1, message_count=1, provenance=None)
+    error = RenderErrorEvent(prompt_name="p", elapsed_ns=1, error=ValueError("x"))
+
+    for ev in (start, end, error):
+        assert dataclasses.is_dataclass(ev)
+        assert ev.__dataclass_params__.frozen  # type: ignore[attr-defined]
