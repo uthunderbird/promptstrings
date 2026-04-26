@@ -82,7 +82,7 @@ content, with no placeholder substitution.
    The `-> Template` path is the correct dynamic templating mechanism.
 
 2. *Externally loaded template strings* (database, config system): parse the
-   loaded string with `parse_docstring_template(source)` (see D5) to obtain a
+   loaded string with `parse_trusted_template(source)` (see D5) to obtain a
    `Template`, then return the `Template` from the function body.
 
 **Retired promise:** ADR 0001 P0-6 ("dynamic PromptSource can introduce
@@ -139,9 +139,9 @@ and re-raise as `PromptRenderError` with `missing_key=item.expression`. This
 restores the error contract: all render failures are `PromptRenderError`
 subclasses.
 
-### D5 — Public `parse_docstring_template` utility
+### D5 — Public `parse_trusted_template` utility
 
-A public function `parse_docstring_template(source, *, prompt_name)` is added
+A public function `parse_trusted_template(source, *, prompt_name)` is added
 to the library's public API. It delegates to `_parse_docstring` and applies the
 same grammar guards (identifier-only placeholders, no format specs, no
 conversions). This enables the externally-loaded-template use case (migration
@@ -161,7 +161,7 @@ The framework guarantees injection safety on the following paths:
 | `-> Template` (t-string return) | **Guaranteed** — Python evaluates all expressions before the function returns; `_render_dynamic` uses `item.value`, no re-parsing |
 | `-> PromptSource` (after D1) | **Guaranteed** — `.content` is a literal string passthrough; no placeholder substitution |
 | `-> str` (after D1) | **Guaranteed** — treated as literal content; no placeholder substitution |
-| `parse_docstring_template(source)` | **Developer's responsibility** — caller must ensure `source` is not user-controlled |
+| `parse_trusted_template(source)` | **Developer's responsibility** — caller must ensure `source` is not user-controlled |
 
 The framework does not and cannot prevent prompt injection of user-controlled
 *values* into template *output* — that is a downstream concern outside the
@@ -177,7 +177,7 @@ framework's scope.
   (`parse_as_template: bool = False`).** Rejected: opt-in injection surfaces
   are still injection surfaces. The flag conflates provenance-carrying
   (`PromptSource`'s purpose) with template-parsing (`Template`'s purpose).
-  `parse_docstring_template` provides the same capability with explicit
+  `parse_trusted_template` provides the same capability with explicit
   developer intent and a visible security call-site.
 
 - **Root-identifier extraction from `Interpolation.expression` for D3.**
@@ -190,7 +190,7 @@ framework's scope.
 
 **Positive:**
 - Second-parse injection is architecturally eliminated on all paths except the
-  explicitly documented `parse_docstring_template` utility.
+  explicitly documented `parse_trusted_template` utility.
 - The injection safety model is complete and honest: four paths, each with a
   clear guarantee or explicit developer responsibility.
 - Error contract is restored: all render failures are `PromptRenderError`.
@@ -203,7 +203,7 @@ framework's scope.
 - ADR 0001 P0-6 (dynamic PromptSource re-parse) is retired — a semver-relevant
   change. Code using `PromptSource(content="{placeholder}...")` must migrate.
 - `PromptCompileError.cause` Literal gains a new member `"mixed_source_mode"`.
-- `parse_docstring_template` adds a new public API surface that must be maintained
+- `parse_trusted_template` adds a new public API surface that must be maintained
   with stable semver guarantees.
 
 **Neutral:**
@@ -212,7 +212,7 @@ framework's scope.
 - Generator substring heuristic (ADR 0004) is unchanged; structural strict-mode
   now falls back to it more often (for non-identifier expressions), which is
   the documented behavior.
-- `_parse_docstring` remains internal; `parse_docstring_template` is the
+- `_parse_docstring` remains internal; `parse_trusted_template` is the
   stable public name.
 
 ## Notes

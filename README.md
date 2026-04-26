@@ -26,7 +26,7 @@ gives you:
 pip install promptstrings
 ```
 
-Requires Python 3.13+.
+Requires Python 3.14+.
 
 ## Quickstart
 
@@ -99,11 +99,77 @@ def conversation(topic: str):
     yield f"Tell me about {topic}."
 ```
 
+## Dynamic templates (t-strings)
+
+For prompts built at runtime — for example, from a function argument or
+database-loaded string — return a Python 3.14 t-string (`t"..."`) annotated
+`-> Template`:
+
+```python
+from string.templatelib import Template
+from promptstrings import promptstring, PromptContext
+
+@promptstring
+def greet(name: str) -> Template:
+    return t"Hello, {name}."
+
+text = await greet.render(PromptContext({"name": "Ada"}))
+```
+
+The t-string path is injection-safe: Python evaluates all expressions before
+the function returns; the framework never re-parses the resulting string.
+
+For externally loaded template strings (database, config), use
+`parse_trusted_template`:
+
+```python
+from string.templatelib import Template
+from promptstrings import promptstring, parse_trusted_template, PromptContext
+
+template_from_db = "You are an expert on {topic}."  # trusted, not user-supplied
+
+@promptstring
+def system(topic: str) -> Template:
+    return parse_trusted_template(template_from_db)
+```
+
+> **Security:** only pass trusted strings to `parse_trusted_template`.
+> User-controlled input containing `{param_name}` syntax will be substituted.
+
 ## Provenance
 
-Return a `PromptSource(content=..., provenance=PromptSourceProvenance(...))`
-from your function instead of relying on the docstring, and the `provenance`
-field will be attached to every `PromptMessage` produced.
+Attach provenance metadata to rendered messages by returning a `PromptSource`
+with a `PromptSourceProvenance`. The `content` field of `PromptSource` is a
+**literal string** — no placeholder substitution occurs. For dynamic content
+with provenance, use `@promptstring_generator` and yield `PromptMessage`
+objects directly:
+
+```python
+from promptstrings import promptstring_generator, Role, PromptMessage, PromptSourceProvenance
+
+prov = PromptSourceProvenance(source_id="system-v2", version="2026-04-27")
+
+@promptstring_generator
+def system_prompt(topic: str):
+    yield PromptMessage(
+        role="system",
+        content=f"You are an expert on {topic}.",
+        source=prov,
+    )
+```
+
+For a static template with provenance, use `PromptSource` with literal content:
+
+```python
+from promptstrings import promptstring, PromptSource, PromptSourceProvenance
+
+@promptstring(strict=False)
+def static_prompt() -> PromptSource:
+    return PromptSource(
+        content="You are a helpful assistant.",
+        provenance=PromptSourceProvenance(source_id="assistant-v1"),
+    )
+```
 
 ## Stability
 

@@ -17,7 +17,7 @@ from .core import (
     RenderErrorEvent,
     RenderStartEvent,
     Role,
-    parse_docstring_template,
+    parse_trusted_template,
     promptstring,
     promptstring_generator,
 )
@@ -41,7 +41,7 @@ __all__ = [
     "RenderErrorEvent",
     "RenderStartEvent",
     "Role",
-    "parse_docstring_template",
+    "parse_trusted_template",
     "promptstring",
     "promptstring_generator",
 ]
