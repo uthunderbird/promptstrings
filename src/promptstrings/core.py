@@ -556,22 +556,26 @@ def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def parse_docstring_template(source: str, *, prompt_name: str = "<unknown>") -> Template:
-    """Parse a template string into a stdlib Template for use in @promptstring functions.
+def parse_trusted_template(source: str, *, prompt_name: str = "<unknown>") -> Template:
+    """Parse a **trusted** template string into a stdlib Template.
+
+    The name signals the security contract: only pass strings whose content
+    you control. Do not pass user-supplied input — placeholder expressions
+    in the returned Template are substituted from resolved parameters at render
+    time, so a user-controlled ``{param_name}`` would be silently replaced with
+    the parameter's value.
 
     Applies the same grammar guards as docstring templates: identifier-only
-    placeholders, no format specs, no conversions.
+    placeholders, no format specs, no conversions. Raises ``PromptCompileError``
+    for invalid grammar.
 
-    Use this when loading prompt templates from external sources (database, config
-    system) that need placeholder substitution at render time. Return the resulting
-    Template from a function annotated ``-> Template``.
+    Typical use: loading prompt templates from a version-controlled database or
+    config system. Return the result from a function annotated ``-> Template``::
 
-    .. warning::
-        Do not pass user-controlled strings to this function. The caller is
-        responsible for ensuring *source* is trusted content. Placeholder
-        expressions in the returned Template are substituted at render time from
-        resolved parameters — user-controlled input containing ``{param_name}``
-        syntax will be substituted silently.
+        @promptstring
+        def system(topic: str) -> Template:
+            template_str = db.get("system_prompt")  # trusted source
+            return parse_trusted_template(template_str)
     """
     return _parse_docstring(source, prompt_name=prompt_name)
 
@@ -709,6 +713,13 @@ class _PromptString:
         self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
             inspect.signature(fn).parameters
         )
+        # Params with PromptDepends/AwaitPromptDepends defaults are exempt from unused checks:
+        # they may be resolved for side effects without being referenced in the template.
+        self._dep_params: frozenset[str] = frozenset(
+            name
+            for name, param in self.declared_parameters.items()
+            if isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+        )
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -768,11 +779,16 @@ class _PromptString:
             if missing := sorted(name for name in placeholders if name not in resolved):
                 raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
             if self._strict:
-                unused_params = sorted(name for name in resolved if name not in placeholders)
+                unused_params = sorted(
+                    name for name in resolved
+                    if name not in placeholders and name not in self._dep_params
+                )
                 if unused_params:
+                    names = ", ".join(f"'{n}'" for n in unused_params)
                     raise PromptUnusedParameterError(
-                        "Resolved prompt parameters were not used by the selected source: "
-                        + ", ".join(unused_params),
+                        f"Parameter(s) {names} were resolved but not referenced in the template. "
+                        f"Add a {{{unused_params[0]}}} placeholder to the docstring, or pass strict=False "
+                        f"to allow unused parameters.",
                         unused_parameters=tuple(unused_params),
                         resolved_keys=tuple(sorted(resolved.keys())),
                     )
@@ -781,23 +797,28 @@ class _PromptString:
         elif isinstance(source, Template):
             tpl = source
             placeholders = _placeholders_from_template(tpl)
-            # Detect whether this Template came from parse_docstring_template (has _MISSING
+            # Detect whether this Template came from parse_trusted_template (has _MISSING
             # sentinel values) or from a real t-string (values already resolved).
             is_parse_derived = any(
                 i.value is _MISSING for i in tpl.interpolations
             )
             if is_parse_derived:
-                # parse_docstring_template path: render via expression→resolved lookup.
+                # parse_trusted_template path: render via expression→resolved lookup.
                 if missing := sorted(name for name in placeholders if name not in resolved):
                     raise PromptRenderError(
                         f"Missing prompt values for placeholders: {', '.join(missing)}"
                     )
                 if self._strict:
-                    unused_params = sorted(name for name in resolved if name not in placeholders)
+                    unused_params = sorted(
+                        name for name in resolved
+                        if name not in placeholders and name not in self._dep_params
+                    )
                     if unused_params:
+                        names = ", ".join(f"'{n}'" for n in unused_params)
                         raise PromptUnusedParameterError(
-                            "Resolved prompt parameters were not used by the selected source: "
-                            + ", ".join(unused_params),
+                            f"Parameter(s) {names} were resolved but not referenced in the template. "
+                            f"Add a {{{unused_params[0]}}} placeholder to the template string, or pass strict=False "
+                            f"to allow unused parameters.",
                             unused_parameters=tuple(unused_params),
                             resolved_keys=tuple(sorted(resolved.keys())),
                         )
@@ -805,11 +826,15 @@ class _PromptString:
             else:
                 # T-string-derived dynamic Template: values already resolved.
                 if self._strict:
-                    unused_params = sorted(name for name in resolved if name not in placeholders)
+                    unused_params = sorted(
+                        name for name in resolved
+                        if name not in placeholders and name not in self._dep_params
+                    )
                     if unused_params:
+                        names = ", ".join(f"'{n}'" for n in unused_params)
                         raise PromptUnusedParameterError(
-                            "Resolved prompt parameters were not used by the selected source: "
-                            + ", ".join(unused_params),
+                            f"Parameter(s) {names} were resolved but not referenced in the returned t-string. "
+                            f"Include {{param}} in the t-string, or pass strict=False to allow unused parameters.",
                             unused_parameters=tuple(unused_params),
                             resolved_keys=tuple(sorted(resolved.keys())),
                         )
@@ -910,6 +935,12 @@ class _PromptStringGenerator:
         self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
             inspect.signature(fn).parameters
         )
+        # Params with PromptDepends/AwaitPromptDepends defaults are exempt from unused checks.
+        self._dep_params: frozenset[str] = frozenset(
+            name
+            for name, param in self.declared_parameters.items()
+            if isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+        )
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -1001,11 +1032,16 @@ class _PromptStringGenerator:
                     for name, value in resolved.items()
                     if str(value) in "\n".join(m.content for m in messages)
                 )
-            unused_params = sorted(name for name in resolved if name not in used)
+            unused_params = sorted(
+                name for name in resolved
+                if name not in used and name not in self._dep_params
+            )
             if unused_params:
+                names = ", ".join(f"'{n}'" for n in unused_params)
                 raise PromptUnreferencedParameterError(
-                    "Resolved prompt parameters were not consumed on this generator render path: "
-                    + ", ".join(unused_params),
+                    f"Parameter(s) {names} were resolved but not found in any yielded output. "
+                    f"Include the value of '{unused_params[0]}' in a yield statement, "
+                    f"or pass strict=False to allow unreferenced parameters.",
                     unreferenced_parameters=tuple(unused_params),
                     resolved_keys=tuple(sorted(resolved.keys())),
                 )

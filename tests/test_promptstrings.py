@@ -106,17 +106,16 @@ def test_promptstring_strict_mode_rejects_unused_resolved_params() -> None:
 
     The leaf class is PromptUnusedParameterError (template path), carrying
     exc.unused_parameters and exc.resolved_keys as tuples of strings.
+    Context-value params that are not referenced in the template raise;
+    PromptDepends params are exempt (they may be resolved for side effects).
     """
 
     @promptstring
-    def prompt(
-        name=PromptDepends(lambda ctx: ctx.require("name")),
-        unused=PromptDepends(lambda ctx: "x"),
-    ):
+    def prompt(name: str, unused: str) -> None:
         """Hello, {name}!"""
 
     with pytest.raises(PromptUnusedParameterError) as exc_info:
-        asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+        asyncio.run(prompt.render(PromptContext({"name": "Ada", "unused": "x"})))
     exc = exc_info.value
     # R1: named attributes are tuples of strings.
     assert isinstance(exc.unused_parameters, tuple)
@@ -128,6 +127,24 @@ def test_promptstring_strict_mode_rejects_unused_resolved_params() -> None:
     # Still catchable via parent (PromptStrictnessError and PromptRenderError).
     assert isinstance(exc, PromptStrictnessError)
     assert isinstance(exc, PromptRenderError)
+
+
+def test_promptstring_strict_mode_exempts_prompt_depends_params() -> None:
+    """PromptDepends/AwaitPromptDepends params are exempt from strict unused-param checks.
+
+    They may be resolved for side effects (logging, caching) without being
+    referenced in the template — consistent with FastAPI's DI pattern.
+    """
+
+    @promptstring
+    def prompt(
+        name: str,
+        _logger=PromptDepends(lambda ctx: None),
+    ) -> None:
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    assert result == "Hello, Ada!"
 
 
 def test_promptstring_rejects_non_string_non_none_source_override() -> None:
@@ -1171,21 +1188,21 @@ def test_structural_strict_mode_no_false_positive_for_method_call() -> None:
     assert messages[0].content == "Hello, ADA."
 
 
-def test_parse_docstring_template_public_utility() -> None:
-    """parse_docstring_template returns a Template usable in -> Template functions (ADR 0006 D5)."""
+def test_parse_trusted_template_public_utility() -> None:
+    """parse_trusted_template returns a Template usable in -> Template functions (ADR 0006 D5)."""
     from string.templatelib import Template
 
-    from promptstrings import parse_docstring_template
+    from promptstrings import parse_trusted_template
 
     # Simulate loading a template from an external source.
     external_template_string = "Hello, {name}. Your role is {role}."
-    tpl = parse_docstring_template(external_template_string)
+    tpl = parse_trusted_template(external_template_string)
     assert isinstance(tpl, Template)
     assert frozenset(i.expression for i in tpl.interpolations) == {"name", "role"}
 
     @promptstring
     def ps(name: str, role: str) -> Template:
-        return parse_docstring_template("Hello, {name}. Your role is {role}.")
+        return parse_trusted_template("Hello, {name}. Your role is {role}.")
 
     result = asyncio.run(ps.render(PromptContext({"name": "Ada", "role": "engineer"})))
     assert result == "Hello, Ada. Your role is engineer."
