@@ -8,23 +8,138 @@ import textwrap
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
-from typing import Any, Protocol, overload, runtime_checkable
+from typing import Any, Literal, Protocol, overload, runtime_checkable
 
 
 class PromptRenderError(RuntimeError):
-    """Base class for all prompt render-time failures."""
+    """Base class for all prompt render-time failures (ADR 0003).
 
-    pass
+    Named attributes are JSON-safe and picklable. Use to_dict() for structured
+    access from agents and tooling.
+    """
+
+    missing_key: str | None
+    """Parameter name that could not be resolved; None for non-missing-key failures."""
+
+    context_keys: tuple[str, ...] | None
+    """Keys present in PromptContext.values at error time; None when context unavailable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_key: str | None = None,
+        context_keys: tuple[str, ...] | None = None,
+    ) -> None:
+        """Initialise with optional structured fields."""
+        super().__init__(message)
+        self.missing_key = missing_key
+        self.context_keys = context_keys
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Support pickle round-trip for all named attributes."""
+        return (
+            self.__class__,
+            (str(self),),
+            {"missing_key": self.missing_key, "context_keys": self.context_keys},
+        )
+
+    def __setstate__(self, state: dict[str, Any] | None) -> None:
+        """Restore named attributes after unpickling."""
+        if state:
+            for k, v in state.items():
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation (ADR 0003 rules R-A through R-E)."""
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "missing_key": self.missing_key,
+            "context_keys": list(self.context_keys) if self.context_keys is not None else None,
+        }
 
 
 class PromptCompileError(PromptRenderError):
-    """Raised at decoration time when a template cannot be compiled."""
+    """Raised at decoration time when a template cannot be compiled (ADR 0003).
 
-    pass
+    prompt_name, cause, placeholder, and optimize_mode_active identify the
+    specific compile-time failure. missing_key and context_keys are always None.
+    """
+
+    prompt_name: str
+    """__name__ of the decorated function; always set."""
+
+    cause: Literal["missing_template", "format_spec", "conversion", "non_identifier_placeholder"]
+    """Discriminator for which compile-time check failed."""
+
+    placeholder: str | None
+    """Offending placeholder text; None for cause='missing_template'."""
+
+    optimize_mode_active: bool
+    """True iff sys.flags.optimize >= 2 at decoration time."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        prompt_name: str = "<unknown>",
+        cause: Literal[
+            "missing_template", "format_spec", "conversion", "non_identifier_placeholder"
+        ] = "missing_template",
+        placeholder: str | None = None,
+        optimize_mode_active: bool = False,
+    ) -> None:
+        """Initialise with compile-time error fields; missing_key/context_keys are always None."""
+        super().__init__(message, missing_key=None, context_keys=None)
+        self.prompt_name = prompt_name
+        self.cause = cause
+        self.placeholder = placeholder
+        self.optimize_mode_active = optimize_mode_active
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Support pickle round-trip for all named attributes."""
+        return (
+            self.__class__,
+            (str(self),),
+            {
+                "prompt_name": self.prompt_name,
+                "cause": self.cause,
+                "placeholder": self.placeholder,
+                "optimize_mode_active": self.optimize_mode_active,
+            },
+        )
+
+    def __setstate__(self, state: dict[str, Any] | None) -> None:
+        """Restore named attributes after unpickling."""
+        # Parent fields default to None for compile errors.
+        self.missing_key = None
+        self.context_keys = None
+        if state:
+            for k, v in state.items():
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation (ADR 0003 rules R-A through R-E)."""
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "prompt_name": self.prompt_name,
+            "cause": self.cause,
+            "placeholder": self.placeholder,
+            "optimize_mode_active": self.optimize_mode_active,
+            "missing_key": None,
+            "context_keys": None,
+        }
 
 
 class PromptStrictnessError(PromptRenderError):
-    """Raised when a strict-mode check fails during rendering."""
+    """Parent class for strict-mode failures; never raised directly by library code.
+
+    Catch this class to handle both PromptUnusedParameterError (template path)
+    and PromptUnreferencedParameterError (generator path) uniformly.
+    to_dict() is inherited from PromptRenderError; leaf classes override it.
+    """
 
     pass
 
@@ -112,7 +227,11 @@ class PromptContext:
     def require(self, key: str) -> Any:
         """Return the value for key, raising PromptRenderError if absent."""
         if key not in self.values:
-            raise PromptRenderError(f"Missing prompt context value: {key}")
+            raise PromptRenderError(
+                f"Missing prompt context value: {key}",
+                missing_key=key,
+                context_keys=tuple(self.values.keys()),
+            )
         return self.values[key]
 
 
@@ -169,11 +288,19 @@ def _compile_template(source: str, *, prompt_name: str = "<unknown>") -> _Compil
     for literal, field_name, format_spec, conversion in formatter.parse(source):
         if format_spec:
             raise PromptCompileError(
-                f"Format specs are not supported in promptstrings (prompt: {prompt_name!r})"
+                f"Format specs are not supported in promptstrings (prompt: {prompt_name!r})",
+                prompt_name=prompt_name,
+                cause="format_spec",
+                placeholder=field_name,
+                optimize_mode_active=sys.flags.optimize >= 2,
             )
         if conversion:
             raise PromptCompileError(
-                f"Conversions are not supported in promptstrings (prompt: {prompt_name!r})"
+                f"Conversions are not supported in promptstrings (prompt: {prompt_name!r})",
+                prompt_name=prompt_name,
+                cause="conversion",
+                placeholder=field_name,
+                optimize_mode_active=sys.flags.optimize >= 2,
             )
         parts.append((literal, None))
         if field_name is None:
@@ -181,7 +308,11 @@ def _compile_template(source: str, *, prompt_name: str = "<unknown>") -> _Compil
         if not field_name.isidentifier():
             raise PromptCompileError(
                 f"Promptstring placeholders must use the minimal {{identifier}} grammar "
-                f"(got {field_name!r}, prompt: {prompt_name!r})"
+                f"(got {field_name!r}, prompt: {prompt_name!r})",
+                prompt_name=prompt_name,
+                cause="non_identifier_placeholder",
+                placeholder=field_name,
+                optimize_mode_active=sys.flags.optimize >= 2,
             )
         placeholders.add(field_name)
         parts.append(("", field_name))
@@ -222,14 +353,15 @@ def _compile_at_decoration(
         return None
 
     # Neither docstring nor PromptSource annotation: fail immediately.
-    optimize_note = (
-        " (docstrings are stripped by python -OO; run without -OO)"
-        if sys.flags.optimize >= 2
-        else ""
-    )
+    optimize_active = sys.flags.optimize >= 2
+    optimize_note = " (docstrings are stripped by python -OO; run without -OO)" if optimize_active else ""
     raise PromptCompileError(
         f"Promptstring {prompt_name!r} has no docstring and its return annotation does not "
-        f"prove a PromptSource is returned.{optimize_note}"
+        f"prove a PromptSource is returned.{optimize_note}",
+        prompt_name=prompt_name,
+        cause="missing_template",
+        placeholder=None,
+        optimize_mode_active=optimize_active,
     )
 
 
@@ -255,16 +387,23 @@ async def _resolve_dependencies(
             resolved[name] = context.values[name]
             continue
         if default is inspect.Parameter.empty:
-            raise PromptRenderError(f"Unable to resolve prompt parameter: {name}")
+            raise PromptRenderError(
+                f"Unable to resolve prompt parameter: {name}",
+                missing_key=name,
+                context_keys=tuple(context.values.keys()),
+            )
         resolved[name] = default
     return resolved, awaited_dependency_count
 
 
-def _normalize_source(docstring: str | None) -> str:
+def _normalize_source(docstring: str | None, *, prompt_name: str = "<unknown>") -> str:
     """Normalize a docstring into a trimmed prompt template string."""
     if not docstring:
         raise PromptCompileError(
-            "Promptstring docstring is required when no string source is returned"
+            f"Promptstring {prompt_name!r} docstring is required when no string source is returned",
+            prompt_name=prompt_name,
+            cause="missing_template",
+            optimize_mode_active=sys.flags.optimize >= 2,
         )
     return textwrap.dedent(docstring).strip()
 
@@ -306,7 +445,7 @@ class _PromptString:
         """
         source_candidate = await _maybe_await(self._fn(**resolved))
         if source_candidate is None:
-            return PromptSource(content=_normalize_source(self.__doc__)), True
+            return PromptSource(content=_normalize_source(self.__doc__, prompt_name=self.__name__)), True
         if isinstance(source_candidate, str):
             return PromptSource(content=source_candidate), False
         if isinstance(source_candidate, PromptSource):

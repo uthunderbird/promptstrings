@@ -222,6 +222,122 @@ def test_promptstring_generator_declared_parameters_accessible_without_rendering
 
 
 # ---------------------------------------------------------------------------
+# Exception attributes and to_dict() (ADR 0003 / R6)
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_render_error_to_dict_has_stable_shape() -> None:
+    """PromptRenderError.to_dict() has all documented keys (R-A, R-C) and is JSON-safe (R6)."""
+    import json
+
+    exc = PromptRenderError("oops", missing_key="user", context_keys=("a", "b"))
+    d = exc.to_dict()
+    assert set(d.keys()) == {"type", "message", "missing_key", "context_keys"}
+    assert d["type"] == "PromptRenderError"
+    assert d["missing_key"] == "user"
+    assert d["context_keys"] == ["a", "b"]
+    assert json.dumps(d)  # R6: JSON round-trip
+
+
+def test_prompt_render_error_to_dict_none_fields_present_not_omitted() -> None:
+    """None-valued fields appear as JSON null rather than being omitted (R-C)."""
+    import json
+
+    exc = PromptRenderError("oops")
+    d = exc.to_dict()
+    assert "missing_key" in d
+    assert d["missing_key"] is None
+    assert "context_keys" in d
+    assert d["context_keys"] is None
+    assert json.dumps(d)
+
+
+def test_prompt_compile_error_to_dict_has_stable_shape() -> None:
+    """PromptCompileError.to_dict() includes all documented keys for each cause value (R6)."""
+    import json
+
+    for cause, placeholder in [
+        ("missing_template", None),
+        ("format_spec", "name"),
+        ("conversion", "name"),
+        ("non_identifier_placeholder", "user.name"),
+    ]:
+        exc = PromptCompileError(
+            "failed",
+            prompt_name="my_prompt",
+            cause=cause,  # type: ignore[arg-type]
+            placeholder=placeholder,
+            optimize_mode_active=False,
+        )
+        d = exc.to_dict()
+        expected_keys = {
+            "type", "message", "prompt_name", "cause", "placeholder",
+            "optimize_mode_active", "missing_key", "context_keys",
+        }
+        assert set(d.keys()) == expected_keys, f"Missing keys for cause={cause!r}"
+        assert d["type"] == "PromptCompileError"
+        assert d["cause"] == cause
+        assert d["missing_key"] is None
+        assert d["context_keys"] is None
+        assert json.dumps(d)  # R6: JSON round-trip
+
+
+def test_prompt_render_error_raised_from_context_require_has_structured_fields() -> None:
+    """PromptRenderError from PromptContext.require() carries missing_key and context_keys."""
+    ctx = PromptContext({"a": 1, "b": 2})
+    exc: PromptRenderError | None = None
+    try:
+        ctx.require("missing")
+    except PromptRenderError as e:
+        exc = e
+    assert exc is not None
+    assert exc.missing_key == "missing"
+    assert set(exc.context_keys or ()) == {"a", "b"}
+
+
+def test_exception_hierarchy_pickle_round_trip() -> None:
+    """All public exception classes survive pickle round-trip with named attributes intact."""
+    import pickle
+
+    # PromptRenderError
+    exc1 = PromptRenderError("render fail", missing_key="k", context_keys=("a", "b"))
+    r1 = pickle.loads(pickle.dumps(exc1))
+    assert str(r1) == "render fail"
+    assert r1.missing_key == "k"
+    assert r1.context_keys == ("a", "b")
+
+    # PromptCompileError
+    exc2 = PromptCompileError(
+        "compile fail",
+        prompt_name="p",
+        cause="format_spec",
+        placeholder="x",
+        optimize_mode_active=True,
+    )
+    r2 = pickle.loads(pickle.dumps(exc2))
+    assert str(r2) == "compile fail"
+    assert r2.prompt_name == "p"
+    assert r2.cause == "format_spec"
+    assert r2.placeholder == "x"
+    assert r2.optimize_mode_active is True
+
+
+def test_prompt_compile_error_at_decoration_time_has_cause_and_optimize_flag() -> None:
+    """PromptCompileError raised at decoration time carries cause and optimize_mode_active (R8)."""
+    exc: PromptCompileError | None = None
+    try:
+        @promptstring
+        def bad_prompt():  # type: ignore[empty-body]
+            pass
+    except PromptCompileError as e:
+        exc = e
+    assert exc is not None
+    assert exc.cause == "missing_template"
+    assert exc.prompt_name == "bad_prompt"
+    assert isinstance(exc.optimize_mode_active, bool)
+
+
+# ---------------------------------------------------------------------------
 # Generator form
 # ---------------------------------------------------------------------------
 

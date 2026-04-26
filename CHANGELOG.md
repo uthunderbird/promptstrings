@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Named attributes and `to_dict()` on all public exception classes per ADR 0003 (R6):
+  - `PromptRenderError`: `missing_key: str | None`, `context_keys: tuple[str, ...] | None`
+  - `PromptCompileError`: `prompt_name: str`, `cause: Literal[...]`, `placeholder: str | None`,
+    `optimize_mode_active: bool`; `to_dict()` includes parent fields always as `None`
+  - `PromptStrictnessError`: inherits parent fields; leaf classes override in Step 4
+  - `__reduce__` / `__setstate__` on all exception classes for pickle round-trip (ADR Promise 5)
+- All `PromptCompileError` raise sites wired with `prompt_name`, `cause`, `placeholder`,
+  `optimize_mode_active` structured fields.
+- All `PromptRenderError` missing-key raise sites wired with `missing_key` and `context_keys`.
 - `Promptstring` runtime-checkable Protocol with `placeholders`, `declared_parameters`,
   `render`, and `render_messages` (ADR 0001 Promise 2 / R3 / R9). Both `_PromptString`
   and `_PromptStringGenerator` satisfy the Protocol. Exported from the top-level package.
