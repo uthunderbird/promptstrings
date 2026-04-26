@@ -8,6 +8,11 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0007 — Integrations and Annotated DI syntax](0007-integrations-and-annotated-di-syntax.md)
+  — `Annotated[T, PromptDepends(...)]` as primary DI syntax (default-value form
+  silently deprecated); `promptstrings[dishka]` via `DishkaPromptContext.resolve()`;
+  `promptstrings[pydantic]` via `PydanticPromptContext.from_model()`; integrations
+  live in `src/promptstrings/integrations/`. Accepted 2026-04-27.
 - [0006 — Injection safety and template source boundaries](0006-injection-safety-and-template-source-boundaries.md)
   — Closes four red-team findings: eliminates second-parse injection by making
   `PromptSource.content` and `-> str` returns literal passthrough; adds
