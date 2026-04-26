@@ -447,18 +447,30 @@ def test_promptstring_allows_single_awaited_dependency() -> None:
     assert rendered == "Hello, Ada!"
 
 
-def test_promptstring_rejects_multiple_awaited_dependencies() -> None:
-    """Multiple AwaitPromptDepends currently raises (at-most-one guard still in place)."""
+def test_promptstring_resolves_multiple_awaited_dependencies_concurrently() -> None:
+    """Multiple AwaitPromptDepends run concurrently via asyncio.gather (ADR 0001 Promise 9).
 
-    async def load_name(_ctx: PromptContext) -> str:
+    The old at-most-one guard is removed in 1.0 — this is a one-way door.
+    Resolvers must be cancellation-safe and must not depend on sibling side effects.
+    """
+    resolution_order: list[str] = []
+
+    async def load_first(_ctx: PromptContext) -> str:
+        resolution_order.append("first")
         return "Ada"
+
+    async def load_second(_ctx: PromptContext) -> str:
+        resolution_order.append("second")
+        return "Bob"
 
     @promptstring
     def prompt(
-        first=AwaitPromptDepends(load_name),
-        second=AwaitPromptDepends(load_name),
+        first=AwaitPromptDepends(load_first),
+        second=AwaitPromptDepends(load_second),
     ):
         """Hello, {first} and {second}!"""
 
-    with pytest.raises(PromptRenderError):
-        asyncio.run(prompt.render())
+    rendered = asyncio.run(prompt.render())
+    assert rendered == "Hello, Ada and Bob!"
+    # Both resolvers ran (order not promised per ADR 0001 non-promise 2).
+    assert set(resolution_order) == {"first", "second"}

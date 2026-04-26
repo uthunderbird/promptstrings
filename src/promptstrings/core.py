@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import sys
 import textwrap
@@ -479,20 +480,27 @@ def _compile_at_decoration(
 async def _resolve_dependencies(
     fn: Callable[..., Any],
     context: PromptContext,
-) -> tuple[dict[str, Any], int]:
+) -> dict[str, Any]:
     """Resolve all declared parameters for fn using the given context.
 
-    Returns (resolved_values, awaited_dependency_count).
+    Sync PromptDepends run sequentially in declaration order.
+    AwaitPromptDepends run concurrently via asyncio.gather; the first exception
+    cancels the rest (ADR 0001 Promise 9). No limit on async dep count.
     """
     signature = inspect.signature(fn)
     resolved: dict[str, Any] = {}
-    awaited_dependency_count = 0
+    async_names: list[str] = []
+    async_coros: list[Any] = []
+
     for name, parameter in signature.parameters.items():
         default = parameter.default
-        if isinstance(default, (PromptDepends, AwaitPromptDepends)):
+        if isinstance(default, AwaitPromptDepends):
+            # Collect coroutines; run all concurrently after sync deps.
+            async_names.append(name)
+            async_coros.append(default.resolver(context))
+            continue
+        if isinstance(default, PromptDepends):
             resolved[name] = await _maybe_await(default.resolver(context))
-            if isinstance(default, AwaitPromptDepends):
-                awaited_dependency_count += 1
             continue
         if name in context.values:
             resolved[name] = context.values[name]
@@ -504,7 +512,14 @@ async def _resolve_dependencies(
                 context_keys=tuple(context.values.keys()),
             )
         resolved[name] = default
-    return resolved, awaited_dependency_count
+
+    if async_coros:
+        # Run all AwaitPromptDepends concurrently; first exception cancels rest.
+        results = await asyncio.gather(*async_coros)
+        for name, result in zip(async_names, results):
+            resolved[name] = result
+
+    return resolved
 
 
 def _normalize_source(docstring: str | None, *, prompt_name: str = "<unknown>") -> str:
@@ -576,11 +591,7 @@ class _PromptString:
     async def render(self, context: PromptContext | None = None) -> str:
         """Render the prompt to a single string."""
         ctx = context or PromptContext()
-        resolved, awaited_dependency_count = await _resolve_dependencies(self._fn, ctx)
-        if awaited_dependency_count > 1:
-            raise PromptRenderError(
-                "Promptstring render currently allows at most one AwaitPromptDepends dependency"
-            )
+        resolved = await _resolve_dependencies(self._fn, ctx)
         source, is_docstring_derived = await self._resolve_source(resolved)
         compiled = self._get_compiled(source, is_docstring_derived=is_docstring_derived)
         if missing := sorted(name for name in compiled.placeholders if name not in resolved):
@@ -599,11 +610,7 @@ class _PromptString:
     async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
         """Render the prompt to a list of PromptMessage objects."""
         ctx = context or PromptContext()
-        resolved, awaited_dependency_count = await _resolve_dependencies(self._fn, ctx)
-        if awaited_dependency_count > 1:
-            raise PromptRenderError(
-                "Promptstring render currently allows at most one AwaitPromptDepends dependency"
-            )
+        resolved = await _resolve_dependencies(self._fn, ctx)
         source, is_docstring_derived = await self._resolve_source(resolved)
         compiled = self._get_compiled(source, is_docstring_derived=is_docstring_derived)
         if missing := sorted(name for name in compiled.placeholders if name not in resolved):
@@ -648,11 +655,7 @@ class _PromptStringGenerator:
     async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
         """Render the generator to a list of PromptMessage objects."""
         ctx = context or PromptContext()
-        resolved, awaited_dependency_count = await _resolve_dependencies(self._fn, ctx)
-        if awaited_dependency_count > 1:
-            raise PromptRenderError(
-                "Promptstring render currently allows at most one AwaitPromptDepends dependency"
-            )
+        resolved = await _resolve_dependencies(self._fn, ctx)
         generator = self._fn(**resolved)
         if inspect.isasyncgen(generator):
             items = [item async for item in generator]

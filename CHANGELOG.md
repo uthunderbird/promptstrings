@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Concurrent `AwaitPromptDepends` resolution via `asyncio.gather` (ADR 0001 Promise 9).
+  All `AwaitPromptDepends` in a single render now run concurrently; the first exception
+  cancels the rest. The at-most-one guard is removed — this is a one-way door.
+  Resolvers must be cancellation-safe and must not depend on sibling side effects.
 - `PromptUnusedParameterError` and `PromptUnreferencedParameterError` leaf exception classes
   (ADR 0001 Promise 3, C2 delta / R1 / R4):
   - `PromptUnusedParameterError`: `unused_parameters: tuple[str, ...]`, `resolved_keys: tuple[str, ...]`
