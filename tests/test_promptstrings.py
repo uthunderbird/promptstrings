@@ -1,3 +1,8 @@
+"""Tests for the promptstrings library.
+
+Covers ADR 0001–0004 promises and DX rubric R1–R16.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +11,7 @@ import pytest
 
 from promptstrings import (
     AwaitPromptDepends,
+    PromptCompileError,
     PromptContext,
     PromptDepends,
     PromptMessage,
@@ -18,24 +24,28 @@ from promptstrings import (
     promptstring_generator,
 )
 
+# ---------------------------------------------------------------------------
+# Basic rendering
+# ---------------------------------------------------------------------------
+
 
 def test_promptstring_uses_docstring_when_function_returns_none() -> None:
+    """Docstring is used as the template when the function returns None."""
+
     @promptstring
     def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
-        """
-        Hello, {name}!
-        """
+        """Hello, {name}!"""
 
     rendered = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
     assert rendered == "Hello, Ada!"
 
 
 def test_promptstring_uses_returned_string_when_function_returns_str() -> None:
+    """A returned string overrides the docstring template."""
+
     @promptstring
     def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
-        """
-        ignored {name}
-        """
+        """ignored {name}"""
         return "Override says hi to {name}."
 
     rendered = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
@@ -43,6 +53,7 @@ def test_promptstring_uses_returned_string_when_function_returns_str() -> None:
 
 
 def test_promptstring_supports_prompt_source_provenance_on_messages() -> None:
+    """PromptSourceProvenance flows through to each PromptMessage unchanged."""
     provenance = PromptSourceProvenance(
         source_id="langfuse.session.system",
         version="2026-03-20",
@@ -51,7 +62,7 @@ def test_promptstring_supports_prompt_source_provenance_on_messages() -> None:
     )
 
     @promptstring
-    def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
+    def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))) -> PromptSource:
         return PromptSource(
             content="External source says hi to {name}.",
             provenance=provenance,
@@ -75,42 +86,94 @@ def test_promptstring_supports_prompt_source_provenance_on_messages() -> None:
 
 
 def test_promptstring_strict_mode_rejects_unused_resolved_params() -> None:
+    """Strict mode raises PromptStrictnessError for resolved but unused parameters."""
+
     @promptstring
     def prompt(
-        name=PromptDepends(lambda ctx: ctx.require("name")), unused=PromptDepends(lambda ctx: "x")
+        name=PromptDepends(lambda ctx: ctx.require("name")),
+        unused=PromptDepends(lambda ctx: "x"),
     ):
-        """
-        Hello, {name}!
-        """
+        """Hello, {name}!"""
 
     with pytest.raises(PromptStrictnessError):
         asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
 
 
 def test_promptstring_rejects_non_string_non_none_source_override() -> None:
+    """Returning an unexpected type from the decorated function raises PromptRenderError."""
+
     @promptstring
     def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
-        """
-        Hello, {name}!
-        """
+        """Hello, {name}!"""
         return 123
 
     with pytest.raises(PromptRenderError):
         asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
 
 
-def test_promptstring_rejects_non_minimal_placeholder_grammar() -> None:
-    @promptstring(strict=False)
-    def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
-        """
-        Hello, {user.name}!
-        """
+# ---------------------------------------------------------------------------
+# Compilation and decoration-time checks (ADR 0001 Promises 7 and 8 / R8)
+# ---------------------------------------------------------------------------
 
-    with pytest.raises(PromptRenderError):
-        asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+
+def test_promptstring_rejects_non_minimal_placeholder_grammar_at_decoration_time() -> None:
+    """Non-identifier placeholders raise PromptCompileError at decoration time (not render time).
+
+    This is R8: errors surface at module import, not buried inside render handlers.
+    """
+    with pytest.raises(PromptCompileError):
+
+        @promptstring(strict=False)
+        def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
+            """Hello, {user.name}!"""
+
+
+def test_promptstring_raises_at_decoration_time_when_no_docstring_and_no_source_annotation() -> None:
+    """Decorating a function with no docstring and no PromptSource annotation raises immediately.
+
+    This is R8: the error is caught at decoration time, before any render call.
+    """
+    with pytest.raises(PromptCompileError):
+
+        @promptstring
+        def prompt():  # type: ignore[empty-body]
+            pass
+
+
+def test_promptstring_accepts_no_docstring_when_return_annotation_is_prompt_source() -> None:
+    """Decorating a function annotated to return PromptSource succeeds even without a docstring.
+
+    placeholders is frozenset() until render time (ADR 0001 non-promise 10).
+    """
+
+    @promptstring
+    def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))) -> PromptSource:
+        return PromptSource(content="Hello, {name}!")
+
+    # placeholders is empty because the template is only known at render time.
+    assert prompt.placeholders == frozenset()
+    rendered = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    assert rendered == "Hello, Ada!"
+
+
+def test_promptstring_placeholders_available_immediately_after_decoration() -> None:
+    """placeholders is populated at decoration time for docstring-based templates (ADR 0001 P7)."""
+
+    @promptstring
+    def prompt(name: str, topic: str) -> None:
+        """Tell me about {topic} from the perspective of {name}."""
+
+    assert prompt.placeholders == frozenset({"topic", "name"})
+
+
+# ---------------------------------------------------------------------------
+# Generator form
+# ---------------------------------------------------------------------------
 
 
 def test_promptstring_generator_normalizes_roles_and_messages() -> None:
+    """Generator yields are assembled into role-segmented PromptMessage objects."""
+
     @promptstring_generator
     def prompt(name=PromptDepends(lambda ctx: ctx.require("name"))):
         yield "First line"
@@ -126,21 +189,28 @@ def test_promptstring_generator_normalizes_roles_and_messages() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Async dependency injection
+# ---------------------------------------------------------------------------
+
+
 def test_promptstring_allows_single_awaited_dependency() -> None:
+    """A single AwaitPromptDepends resolver is awaited and its value injected."""
+
     async def load_name(_ctx: PromptContext) -> str:
         return "Ada"
 
     @promptstring
     def prompt(name=AwaitPromptDepends(load_name)):
-        """
-        Hello, {name}!
-        """
+        """Hello, {name}!"""
 
     rendered = asyncio.run(prompt.render())
     assert rendered == "Hello, Ada!"
 
 
 def test_promptstring_rejects_multiple_awaited_dependencies() -> None:
+    """Multiple AwaitPromptDepends currently raises (at-most-one guard still in place)."""
+
     async def load_name(_ctx: PromptContext) -> str:
         return "Ada"
 
@@ -149,9 +219,7 @@ def test_promptstring_rejects_multiple_awaited_dependencies() -> None:
         first=AwaitPromptDepends(load_name),
         second=AwaitPromptDepends(load_name),
     ):
-        """
-        Hello, {first} and {second}!
-        """
+        """Hello, {first} and {second}!"""
 
     with pytest.raises(PromptRenderError):
         asyncio.run(prompt.render())
