@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `PromptUnusedParameterError` and `PromptUnreferencedParameterError` leaf exception classes
+  (ADR 0001 Promise 3, C2 delta / R1 / R4):
+  - `PromptUnusedParameterError`: `unused_parameters: tuple[str, ...]`, `resolved_keys: tuple[str, ...]`
+  - `PromptUnreferencedParameterError`: `unreferenced_parameters: tuple[str, ...]`, `resolved_keys: tuple[str, ...]`
+  - Both exported from top-level package.
+  - Strict-mode raise sites in `_PromptString` updated to use `PromptUnusedParameterError`.
+  - Strict-mode raise site in `_PromptStringGenerator` updated to use `PromptUnreferencedParameterError`.
 - Named attributes and `to_dict()` on all public exception classes per ADR 0003 (R6):
   - `PromptRenderError`: `missing_key: str | None`, `context_keys: tuple[str, ...] | None`
   - `PromptCompileError`: `prompt_name: str`, `cause: Literal[...]`, `placeholder: str | None`,

@@ -20,6 +20,8 @@ from promptstrings import (
     PromptSourceProvenance,
     PromptStrictnessError,
     Promptstring,
+    PromptUnreferencedParameterError,
+    PromptUnusedParameterError,
     Role,
     promptstring,
     promptstring_generator,
@@ -87,7 +89,11 @@ def test_promptstring_supports_prompt_source_provenance_on_messages() -> None:
 
 
 def test_promptstring_strict_mode_rejects_unused_resolved_params() -> None:
-    """Strict mode raises PromptStrictnessError for resolved but unused parameters."""
+    """Strict mode raises PromptUnusedParameterError with structured fields (R1, R4).
+
+    The leaf class is PromptUnusedParameterError (template path), carrying
+    exc.unused_parameters and exc.resolved_keys as tuples of strings.
+    """
 
     @promptstring
     def prompt(
@@ -96,8 +102,19 @@ def test_promptstring_strict_mode_rejects_unused_resolved_params() -> None:
     ):
         """Hello, {name}!"""
 
-    with pytest.raises(PromptStrictnessError):
+    with pytest.raises(PromptUnusedParameterError) as exc_info:
         asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    exc = exc_info.value
+    # R1: named attributes are tuples of strings.
+    assert isinstance(exc.unused_parameters, tuple)
+    assert isinstance(exc.resolved_keys, tuple)
+    assert "unused" in exc.unused_parameters
+    assert "name" in exc.resolved_keys
+    # R4: template path raises the correct leaf, NOT the generator leaf.
+    assert not isinstance(exc, PromptUnreferencedParameterError)
+    # Still catchable via parent (PromptStrictnessError and PromptRenderError).
+    assert isinstance(exc, PromptStrictnessError)
+    assert isinstance(exc, PromptRenderError)
 
 
 def test_promptstring_rejects_non_string_non_none_source_override() -> None:
@@ -320,6 +337,57 @@ def test_exception_hierarchy_pickle_round_trip() -> None:
     assert r2.cause == "format_spec"
     assert r2.placeholder == "x"
     assert r2.optimize_mode_active is True
+
+
+def test_prompt_unused_parameter_error_to_dict_shape() -> None:
+    """PromptUnusedParameterError.to_dict() has all ADR 0003 documented keys (R6)."""
+    import json
+
+    exc = PromptUnusedParameterError(
+        "unused: x",
+        unused_parameters=("x",),
+        resolved_keys=("x", "y"),
+    )
+    d = exc.to_dict()
+    assert set(d.keys()) == {"type", "message", "unused_parameters", "resolved_keys", "missing_key", "context_keys"}
+    assert d["type"] == "PromptUnusedParameterError"
+    assert d["unused_parameters"] == ["x"]
+    assert d["resolved_keys"] == ["x", "y"]
+    assert d["missing_key"] is None
+    assert d["context_keys"] is None
+    assert json.dumps(d)
+
+
+def test_prompt_unreferenced_parameter_error_to_dict_shape() -> None:
+    """PromptUnreferencedParameterError.to_dict() has all ADR 0003 documented keys (R6)."""
+    import json
+
+    exc = PromptUnreferencedParameterError(
+        "unreferenced: z",
+        unreferenced_parameters=("z",),
+        resolved_keys=("z", "w"),
+    )
+    d = exc.to_dict()
+    assert set(d.keys()) == {"type", "message", "unreferenced_parameters", "resolved_keys", "missing_key", "context_keys"}
+    assert d["type"] == "PromptUnreferencedParameterError"
+    assert json.dumps(d)
+
+
+def test_generator_strict_mode_raises_unreferenced_not_unused() -> None:
+    """Generator strict path raises PromptUnreferencedParameterError, not PromptUnusedParameterError (R4)."""
+
+    @promptstring_generator(strict=True)
+    def prompt(topic: str, unused: str = "dropped"):
+        yield f"Tell me about {topic}."
+
+    with pytest.raises(PromptUnreferencedParameterError) as exc_info:
+        asyncio.run(prompt.render_messages(PromptContext({"topic": "Python", "unused": "dropped"})))
+    exc = exc_info.value
+    assert "unused" in exc.unreferenced_parameters
+    assert isinstance(exc.resolved_keys, tuple)
+    # Must NOT be the template-path leaf.
+    assert not isinstance(exc, PromptUnusedParameterError)
+    assert isinstance(exc, PromptStrictnessError)
 
 
 def test_prompt_compile_error_at_decoration_time_has_cause_and_optimize_flag() -> None:

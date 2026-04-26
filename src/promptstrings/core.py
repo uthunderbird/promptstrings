@@ -144,6 +144,117 @@ class PromptStrictnessError(PromptRenderError):
     pass
 
 
+class PromptUnusedParameterError(PromptStrictnessError):
+    """Raised by @promptstring when a resolved parameter is not in the template (ADR 0001 P3).
+
+    Fix: remove the parameter from the function signature, or add a {name} placeholder.
+    """
+
+    unused_parameters: tuple[str, ...]
+    """Names of parameters that were resolved but not consumed by the template."""
+
+    resolved_keys: tuple[str, ...]
+    """All parameter names that were resolved at render time."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        unused_parameters: tuple[str, ...],
+        resolved_keys: tuple[str, ...],
+    ) -> None:
+        """Initialise with the set of unused and all resolved parameter names."""
+        super().__init__(message)
+        self.unused_parameters = unused_parameters
+        self.resolved_keys = resolved_keys
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Support pickle round-trip."""
+        return (
+            self.__class__,
+            (str(self),),
+            {
+                "unused_parameters": self.unused_parameters,
+                "resolved_keys": self.resolved_keys,
+            },
+        )
+
+    def __setstate__(self, state: dict[str, Any] | None) -> None:
+        """Restore named attributes after unpickling."""
+        self.missing_key = None
+        self.context_keys = None
+        if state:
+            for k, v in state.items():
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation (ADR 0003 rules R-A through R-E)."""
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "unused_parameters": list(self.unused_parameters),
+            "resolved_keys": list(self.resolved_keys),
+            "missing_key": None,
+            "context_keys": None,
+        }
+
+
+class PromptUnreferencedParameterError(PromptStrictnessError):
+    """Raised by @promptstring_generator (strict=True) when a parameter value is not in output.
+
+    Fix: yield a string containing the parameter's str() value, or remove the parameter.
+    Note: the detection is best-effort (substring heuristic); see ADR 0004.
+    """
+
+    unreferenced_parameters: tuple[str, ...]
+    """Names of parameters whose str() value was not found in the rendered output."""
+
+    resolved_keys: tuple[str, ...]
+    """All parameter names that were resolved at render time."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        unreferenced_parameters: tuple[str, ...],
+        resolved_keys: tuple[str, ...],
+    ) -> None:
+        """Initialise with the set of unreferenced and all resolved parameter names."""
+        super().__init__(message)
+        self.unreferenced_parameters = unreferenced_parameters
+        self.resolved_keys = resolved_keys
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Support pickle round-trip."""
+        return (
+            self.__class__,
+            (str(self),),
+            {
+                "unreferenced_parameters": self.unreferenced_parameters,
+                "resolved_keys": self.resolved_keys,
+            },
+        )
+
+    def __setstate__(self, state: dict[str, Any] | None) -> None:
+        """Restore named attributes after unpickling."""
+        self.missing_key = None
+        self.context_keys = None
+        if state:
+            for k, v in state.items():
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation (ADR 0003 rules R-A through R-E)."""
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "unreferenced_parameters": list(self.unreferenced_parameters),
+            "resolved_keys": list(self.resolved_keys),
+            "missing_key": None,
+            "context_keys": None,
+        }
+
+
 @runtime_checkable
 class Promptstring(Protocol):
     """Runtime-checkable Protocol for all promptstring objects (ADR 0001 Promise 2).
@@ -477,9 +588,11 @@ class _PromptString:
         if self._strict:
             unused_params = sorted(name for name in resolved if name not in compiled.placeholders)
             if unused_params:
-                raise PromptStrictnessError(
+                raise PromptUnusedParameterError(
                     "Resolved prompt parameters were not used by the selected source: "
-                    + ", ".join(unused_params)
+                    + ", ".join(unused_params),
+                    unused_parameters=tuple(unused_params),
+                    resolved_keys=tuple(sorted(resolved.keys())),
                 )
         return compiled.render(resolved)
 
@@ -498,9 +611,11 @@ class _PromptString:
         if self._strict:
             unused_params = sorted(name for name in resolved if name not in compiled.placeholders)
             if unused_params:
-                raise PromptStrictnessError(
+                raise PromptUnusedParameterError(
                     "Resolved prompt parameters were not used by the selected source: "
-                    + ", ".join(unused_params)
+                    + ", ".join(unused_params),
+                    unused_parameters=tuple(unused_params),
+                    resolved_keys=tuple(sorted(resolved.keys())),
                 )
         return [
             PromptMessage(
@@ -581,9 +696,11 @@ class _PromptStringGenerator:
             }
             unused_params = sorted(name for name in resolved if name not in used)
             if unused_params:
-                raise PromptStrictnessError(
+                raise PromptUnreferencedParameterError(
                     "Resolved prompt parameters were not consumed on this generator render path: "
-                    + ", ".join(unused_params)
+                    + ", ".join(unused_params),
+                    unreferenced_parameters=tuple(unused_params),
+                    resolved_keys=tuple(sorted(resolved.keys())),
                 )
         return messages
 
