@@ -165,8 +165,8 @@ class PromptUnusedParameterError(PromptStrictnessError):
         self,
         message: str,
         *,
-        unused_parameters: tuple[str, ...],
-        resolved_keys: tuple[str, ...],
+        unused_parameters: tuple[str, ...] = (),
+        resolved_keys: tuple[str, ...] = (),
     ) -> None:
         """Initialise with the set of unused and all resolved parameter names."""
         super().__init__(message)
@@ -221,8 +221,8 @@ class PromptUnreferencedParameterError(PromptStrictnessError):
         self,
         message: str,
         *,
-        unreferenced_parameters: tuple[str, ...],
-        resolved_keys: tuple[str, ...],
+        unreferenced_parameters: tuple[str, ...] = (),
+        resolved_keys: tuple[str, ...] = (),
     ) -> None:
         """Initialise with the set of unreferenced and all resolved parameter names."""
         super().__init__(message)

@@ -664,3 +664,268 @@ def test_render_event_dataclasses_are_frozen() -> None:
     for ev in (start, end, error):
         assert dataclasses.is_dataclass(ev)
         assert ev.__dataclass_params__.frozen  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# P0-1: Observer wiring on the three untested render paths
+# ---------------------------------------------------------------------------
+
+
+def test_observer_fires_on_promptstring_render_messages() -> None:
+    """_PromptString.render_messages() fires start then end observer events (P0-1)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    @lib.promptstring
+    def ps(name: str) -> None:
+        """Hello, {name}."""
+
+    messages = asyncio.run(ps.render_messages(PromptContext({"name": "Ada"})))
+    assert len(messages) == 1
+    assert messages[0].content == "Hello, Ada."
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderEndEvent)
+    assert spy.calls[0].prompt_name == "ps"
+
+
+def test_observer_fires_on_promptstring_generator_render_messages() -> None:
+    """_PromptStringGenerator.render_messages() fires start then end observer events (P0-1)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    @lib.promptstring_generator
+    def psg(topic: str):
+        yield f"Tell me about {topic}."
+
+    messages = asyncio.run(psg.render_messages(PromptContext({"topic": "Python"})))
+    assert len(messages) == 1
+    assert messages[0].content == "Tell me about Python."
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderEndEvent)
+    assert spy.calls[0].prompt_name == "psg"
+
+
+def test_observer_fires_on_promptstring_generator_render() -> None:
+    """_PromptStringGenerator.render() fires start then end observer events (P0-1)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    @lib.promptstring_generator
+    def psg(topic: str):
+        yield f"Tell me about {topic}."
+
+    result = asyncio.run(psg.render(PromptContext({"topic": "Python"})))
+    assert result == "Tell me about Python."
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderEndEvent)
+
+
+# ---------------------------------------------------------------------------
+# P0-2: Leaf exception pickle round-trips
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_unused_parameter_error_pickle_round_trip() -> None:
+    """PromptUnusedParameterError named attributes survive pickle round-trip (P0-2)."""
+    import pickle
+
+    exc = PromptUnusedParameterError(
+        "unused: x",
+        unused_parameters=("x",),
+        resolved_keys=("x", "y"),
+    )
+    r = pickle.loads(pickle.dumps(exc))
+    assert str(r) == "unused: x"
+    assert r.unused_parameters == ("x",)
+    assert r.resolved_keys == ("x", "y")
+    assert r.missing_key is None
+    assert r.context_keys is None
+
+
+def test_prompt_unreferenced_parameter_error_pickle_round_trip() -> None:
+    """PromptUnreferencedParameterError named attributes survive pickle round-trip (P0-2)."""
+    import pickle
+
+    exc = PromptUnreferencedParameterError(
+        "unreferenced: z",
+        unreferenced_parameters=("z",),
+        resolved_keys=("z", "w"),
+    )
+    r = pickle.loads(pickle.dumps(exc))
+    assert str(r) == "unreferenced: z"
+    assert r.unreferenced_parameters == ("z",)
+    assert r.resolved_keys == ("z", "w")
+    assert r.missing_key is None
+    assert r.context_keys is None
+
+
+# ---------------------------------------------------------------------------
+# P0-3: Generator render() joins multi-message output with "\n\n"
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_generator_render_joins_messages_with_double_newline() -> None:
+    """_PromptStringGenerator.render() joins multiple messages with '\\n\\n', not '\\n' (P0-3).
+
+    This distinguishes generator render() from _PromptString.render() which uses '\\n'.
+    """
+
+    @promptstring_generator
+    def psg(name: str):
+        yield Role("system")
+        yield "You are a helpful assistant."
+        yield Role("user")
+        yield f"Hello, I am {name}."
+
+    result = asyncio.run(psg.render(PromptContext({"name": "Ada"})))
+    assert result == "You are a helpful assistant.\n\nHello, I am Ada."
+
+
+# ---------------------------------------------------------------------------
+# P0-4: PromptCompileError cause values for format_spec and conversion
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_raises_compile_error_for_format_spec_placeholder() -> None:
+    """A placeholder with a format spec raises PromptCompileError with cause='format_spec' (P0-4)."""
+    exc: PromptCompileError | None = None
+    try:
+
+        @promptstring(strict=False)
+        def ps(name: str) -> None:
+            """Hello, {name:>10}."""
+
+    except PromptCompileError as e:
+        exc = e
+    assert exc is not None
+    assert exc.cause == "format_spec"
+    assert exc.placeholder == "name"
+
+
+def test_promptstring_raises_compile_error_for_conversion_placeholder() -> None:
+    """A placeholder with a conversion flag raises PromptCompileError with cause='conversion' (P0-4)."""
+    exc: PromptCompileError | None = None
+    try:
+
+        @promptstring(strict=False)
+        def ps(name: str) -> None:
+            """Hello, {name!r}."""
+
+    except PromptCompileError as e:
+        exc = e
+    assert exc is not None
+    assert exc.cause == "conversion"
+    assert exc.placeholder == "name"
+
+
+# ---------------------------------------------------------------------------
+# P0-5: AwaitPromptDepends error propagation through observer
+# ---------------------------------------------------------------------------
+
+
+def test_awaited_dependency_error_fires_render_error_event() -> None:
+    """When an async resolver raises, the error fires RenderErrorEvent before propagating (P0-5)."""
+    spy = _SpyObserver()
+    lib = Promptstrings(observer=spy)
+
+    class _ResolverError(RuntimeError):
+        pass
+
+    async def bad_resolver(_ctx: PromptContext) -> str:
+        raise _ResolverError("resolver failed")
+
+    @lib.promptstring
+    def ps(name=AwaitPromptDepends(bad_resolver)):
+        """Hello, {name}."""
+
+    with pytest.raises(_ResolverError):
+        asyncio.run(ps.render())
+
+    # Observer must have received start then error — not end.
+    assert len(spy.calls) == 2
+    assert isinstance(spy.calls[0], RenderStartEvent)
+    assert isinstance(spy.calls[1], RenderErrorEvent)
+    err_event = spy.calls[1]
+    assert isinstance(err_event, RenderErrorEvent)
+    assert isinstance(err_event.error, _ResolverError)
+
+
+# ---------------------------------------------------------------------------
+# P0-6: Missing placeholder at render time (dynamic PromptSource)
+# ---------------------------------------------------------------------------
+
+
+def test_render_raises_when_dynamic_source_introduces_unresolvable_placeholder() -> None:
+    """PromptRenderError is raised when a dynamic PromptSource contains a placeholder with no resolver (P0-6).
+
+    The function is annotated PromptSource so it compiles successfully; the extra
+    placeholder is only discovered at render time when the returned template is compiled.
+    """
+
+    @promptstring(strict=False)
+    def ps(name: str) -> PromptSource:
+        # Returns a template with {mystery}, but 'mystery' is not a declared parameter.
+        return PromptSource(content="Hello, {name} and {mystery}.")
+
+    with pytest.raises(PromptRenderError):
+        asyncio.run(ps.render(PromptContext({"name": "Ada"})))
+
+
+# ---------------------------------------------------------------------------
+# Bounded concerns: BC-2, BC-3, BC-4, BC-6
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_uses_python_default_when_param_not_in_context() -> None:
+    """A parameter with a Python default and no PromptDepends uses the default (BC-2).
+
+    No PromptContext value is needed — the function signature default is used directly.
+    """
+
+    @promptstring
+    def ps(greeting: str = "Hello") -> None:
+        """Prompt: {greeting}, world!"""
+
+    result = asyncio.run(ps.render())
+    assert result == "Prompt: Hello, world!"
+
+
+def test_prompt_source_provenance_as_metadata_omits_none_fields() -> None:
+    """PromptSourceProvenance.as_metadata() omits fields whose value is None (BC-3)."""
+    provenance = PromptSourceProvenance(source_id="my-prompt", version="2026-04-26")
+    metadata = provenance.as_metadata()
+    assert metadata == {"source_id": "my-prompt", "version": "2026-04-26"}
+    assert "hash" not in metadata
+    assert "provider_name" not in metadata
+
+
+def test_promptstring_generator_raises_on_unsupported_yield_type() -> None:
+    """Yielding a non-string, non-Role, non-PromptMessage value raises PromptRenderError (BC-4)."""
+
+    @promptstring_generator
+    def psg():
+        yield 42  # type: ignore[misc]
+
+    with pytest.raises(PromptRenderError):
+        asyncio.run(psg.render_messages())
+
+
+async def _async_generator_body(topic: str):  # type: ignore[return]
+    """Async generator used by BC-6 test."""
+    yield Role("system")
+    yield f"Tell me about {topic}."
+    yield Role("user")
+    yield "Go ahead."
+
+
+def test_promptstring_generator_supports_async_generator_body() -> None:
+    """@promptstring_generator works with async def generator functions (BC-6)."""
+    psg = promptstring_generator(_async_generator_body)
+
+    messages = asyncio.run(psg.render_messages(PromptContext({"topic": "Python"})))
+    assert len(messages) == 2
+    assert messages[0] == PromptMessage(role="system", content="Tell me about Python.")
+    assert messages[1] == PromptMessage(role="user", content="Go ahead.")
