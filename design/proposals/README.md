@@ -26,13 +26,17 @@ graveyard of "decided but never archived" docs.
 
 - [API and DX baseline for 1.0](api-1.0-baseline.md) — promises,
   non-promises, lifecycle map, and DX rubric for the 1.0 contract.
-  Proposed 2026-04-26.
+  **Accepted 2026-04-26 → promoted to
+  [ADR 0001](../decisions/0001-api-and-dx-baseline-for-1.0.md).**
+  Preserved as historical context.
 - [External dev API and integration seams for 1.0](api-1.0-integrations.md)
   — `Promptstrings` configuration carrier, `Observer` Protocol with
   three event types, `PromptContext.extras` namespace; per-vendor
   integration sketches for Pydantic, Dishka, fast-depends, OTel,
-  structlog, eval frameworks, and prompt-management systems. Layers
-  on top of the baseline; nothing retracted. Proposed 2026-04-26.
+  structlog, eval frameworks, and prompt-management systems.
+  **Accepted 2026-04-26 → promoted to
+  [ADR 0002](../decisions/0002-integration-seams-for-1.0.md).**
+  Preserved as historical context.
 
 ## Frontmatter
 

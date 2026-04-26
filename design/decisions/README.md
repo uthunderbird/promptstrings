@@ -8,7 +8,15 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
-_No ADRs yet._
+- [0002 — Integration seams for 1.0](0002-integration-seams-for-1.0.md)
+  — `Promptstrings` configuration carrier, `Observer` Protocol with
+  three event dataclasses, `PromptContext.extras` namespace; per-vendor
+  adapter integration model. Layers on top of 0001 without retracting.
+  Accepted 2026-04-26.
+- [0001 — API and DX baseline for 1.0](0001-api-and-dx-baseline-for-1.0.md)
+  — 13 promises, 12 non-promises, lifecycle integration map, DX rubric
+  R1–R10. The locked SemVer contract for the core library.
+  Accepted 2026-04-26.
 
 ## Adding an ADR
 

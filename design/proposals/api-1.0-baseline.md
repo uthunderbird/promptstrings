@@ -1,11 +1,18 @@
 ---
 title: API and DX baseline for promptstrings 1.0
-status: proposed
+status: accepted
 created: 2026-04-26
 updated: 2026-04-26
 ---
 
 # API and DX baseline for promptstrings 1.0
+
+> **Promoted to ADR.** This proposal has been distilled into
+> [`../decisions/0001-api-and-dx-baseline-for-1.0.md`](../decisions/0001-api-and-dx-baseline-for-1.0.md),
+> which carries the locked 1.0 contract. This proposal is preserved
+> as historical context — it includes the full red-team-cycle trace,
+> rationale, and decision drafting notes. For the canonical contract,
+> read the ADR.
 
 ## Purpose
 

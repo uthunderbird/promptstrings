@@ -1,11 +1,18 @@
 ---
 title: External dev API and integration seams for promptstrings 1.0
-status: proposed
+status: accepted
 created: 2026-04-26
 updated: 2026-04-26
 ---
 
 # External dev API and integration seams for promptstrings 1.0
+
+> **Promoted to ADR.** This proposal has been distilled into
+> [`../decisions/0002-integration-seams-for-1.0.md`](../decisions/0002-integration-seams-for-1.0.md),
+> which carries the locked 1.0 integration contract. This proposal is
+> preserved as historical context — it includes the full red-team-cycle
+> trace, per-vendor sketches, and decision rationale. For the canonical
+> contract, read the ADR.
 
 ## Purpose
 

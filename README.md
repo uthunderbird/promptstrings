@@ -119,13 +119,16 @@ The functional vision and 1.0 contract are documented under
   *why* the library exists: the problems it solves and how its developer
   experience answers them. Updated in place, versioned via
   `vision_version`.
-- **[`design/proposals/api-1.0-baseline.md`](design/proposals/api-1.0-baseline.md)**
-  — the SemVer contract (promises, non-promises, lifecycle map, DX
-  rubric).
-- **[`design/proposals/api-1.0-integrations.md`](design/proposals/api-1.0-integrations.md)**
+- **[`design/decisions/0001-api-and-dx-baseline-for-1.0.md`](design/decisions/0001-api-and-dx-baseline-for-1.0.md)**
+  — the locked SemVer contract (13 promises, 12 non-promises,
+  lifecycle map, DX rubric R1–R10). **The canonical contract.**
+- **[`design/decisions/0002-integration-seams-for-1.0.md`](design/decisions/0002-integration-seams-for-1.0.md)**
   — extension surface for 1.0: `Promptstrings` configuration carrier,
   `Observer` Protocol, `PromptContext.extras`, and per-vendor adapter
-  patterns.
+  model. **The canonical contract for integration.**
+- *(historical proposals preserved for the red-team trace and
+  rationale: [`design/proposals/api-1.0-baseline.md`](design/proposals/api-1.0-baseline.md),
+  [`design/proposals/api-1.0-integrations.md`](design/proposals/api-1.0-integrations.md))*
 - **[`design/glossary.md`](design/glossary.md)** — canonical
   vocabulary used across all design docs.
 - **[`design/README.md`](design/README.md)** — directory map and
