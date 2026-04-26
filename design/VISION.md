@@ -435,8 +435,10 @@ This VISION is the apex of the design hierarchy:
             │
             ▼
     decisions/                         — accepted ADRs (0001 baseline,
-                                         0002 integration seams; future
-                                         ADRs numbered 0003…)
+                                         0002 integration seams, 0003
+                                         error-class field schema, 0004
+                                         generator strict-mode; future
+                                         ADRs numbered 0005…)
             │
             ▼
     dx/, agent-dx/                     — DX deep-dives per audience

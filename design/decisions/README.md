@@ -8,6 +8,17 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0004 — Generator strict-mode mechanism](0004-generator-strict-mode-mechanism.md)
+  — Keeps the substring-occurrence heuristic with documented
+  limitations; rejects sentinel-based structural alternatives for 1.0
+  while preserving option (b) `Param` sentinel as the canonical 1.x
+  evolution path. Closes ADR 0001's C4 delta. Accepted 2026-04-26.
+- [0003 — Error class field schema and `to_dict()` contract](0003-error-class-field-schema.md)
+  — Named-attribute schemas for `PromptRenderError`,
+  `PromptCompileError`, `PromptStrictnessError`, and
+  `PromptUnreferencedParameterError`; five convention rules (R-A
+  through R-E) governing `to_dict()` serialization across the
+  hierarchy. Accepted 2026-04-26.
 - [0002 — Integration seams for 1.0](0002-integration-seams-for-1.0.md)
   — `Promptstrings` configuration carrier, `Observer` Protocol with
   three event dataclasses, `PromptContext.extras` namespace; per-vendor
