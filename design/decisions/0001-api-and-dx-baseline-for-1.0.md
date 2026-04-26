@@ -4,7 +4,7 @@
 - **Date:** 2026-04-26
 - **Deciders:** Daniyar Supiyev (author); design contested via Swarm Mode session with named critics (Liskov, Ronacher, Schlawack, Ramírez) and synthesizer roles
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [0005](0005-t-string-template-grammar.md) (template grammar section only)
 
 ## Context
 

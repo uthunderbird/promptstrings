@@ -8,6 +8,11 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0005 — T-string template grammar](0005-t-string-template-grammar.md)
+  — Replaces `str`-based docstring templates with Python 3.14 t-strings
+  as the primary grammar; deprecates docstring path; retires
+  `format_spec`/`conversion` compile errors; bumps target to Python 3.14.
+  Partially supersedes ADR 0001 (template grammar section). Accepted 2026-04-26.
 - [0004 — Generator strict-mode mechanism](0004-generator-strict-mode-mechanism.md)
   — Keeps the substring-occurrence heuristic with documented
   limitations; rejects sentinel-based structural alternatives for 1.0
