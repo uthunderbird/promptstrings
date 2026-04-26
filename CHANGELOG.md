@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Promptstring` runtime-checkable Protocol with `placeholders`, `declared_parameters`,
+  `render`, and `render_messages` (ADR 0001 Promise 2 / R3 / R9). Both `_PromptString`
+  and `_PromptStringGenerator` satisfy the Protocol. Exported from the top-level package.
+- `declared_parameters: Mapping[str, inspect.Parameter]` attribute on both concrete classes,
+  populated at decoration time from `inspect.signature`.
 - Decoration-time template parsing for docstring-sourced `@promptstring` functions
   (ADR 0001 Promises 7 and 8). Templates are now compiled in `__init__`, making
   `placeholders` available immediately without rendering.

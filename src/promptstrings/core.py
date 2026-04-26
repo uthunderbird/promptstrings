@@ -5,10 +5,10 @@ from __future__ import annotations
 import inspect
 import sys
 import textwrap
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
-from typing import Any, overload
+from typing import Any, Protocol, overload, runtime_checkable
 
 
 class PromptRenderError(RuntimeError):
@@ -27,6 +27,29 @@ class PromptStrictnessError(PromptRenderError):
     """Raised when a strict-mode check fails during rendering."""
 
     pass
+
+
+@runtime_checkable
+class Promptstring(Protocol):
+    """Runtime-checkable Protocol for all promptstring objects (ADR 0001 Promise 2).
+
+    The long-term extension surface for the library. User code should type against
+    this Protocol rather than against concrete classes. Append-only in 1.x.
+    """
+
+    placeholders: frozenset[str]
+    """Placeholder names declared in the template. Empty for dynamic-source functions."""
+
+    declared_parameters: Mapping[str, inspect.Parameter]
+    """Declared parameters of the underlying function, keyed by name."""
+
+    async def render(self, context: PromptContext | None = None) -> str:
+        """Render the prompt to a single string."""
+        ...
+
+    async def render_messages(self, context: PromptContext | None = None) -> list[PromptMessage]:
+        """Render the prompt to a list of PromptMessage objects."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -258,6 +281,10 @@ class _PromptString:
         # Eagerly compile template at decoration time (ADR 0001 Promise 7 and 8).
         # _compiled is None for dynamic-source functions (PromptSource annotation).
         self._compiled: _CompiledTemplate | None = _compile_at_decoration(fn, self.__name__)
+        # declared_parameters: immutable at decoration time (ADR 0001 Promise 2).
+        self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
+            inspect.signature(fn).parameters
+        )
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -354,6 +381,10 @@ class _PromptStringGenerator:
         self._strict = strict
         self.__name__ = getattr(fn, "__name__", "promptstring_generator")
         self.__doc__ = getattr(fn, "__doc__", None)
+        # declared_parameters: immutable at decoration time (ADR 0001 Promise 2).
+        self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
+            inspect.signature(fn).parameters
+        )
 
     @property
     def placeholders(self) -> frozenset[str]:

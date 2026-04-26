@@ -19,6 +19,7 @@ from promptstrings import (
     PromptSource,
     PromptSourceProvenance,
     PromptStrictnessError,
+    Promptstring,
     Role,
     promptstring,
     promptstring_generator,
@@ -164,6 +165,60 @@ def test_promptstring_placeholders_available_immediately_after_decoration() -> N
         """Tell me about {topic} from the perspective of {name}."""
 
     assert prompt.placeholders == frozenset({"topic", "name"})
+
+
+# ---------------------------------------------------------------------------
+# Promptstring Protocol (ADR 0001 Promise 2 / R3 / R9)
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_protocol_is_runtime_checkable() -> None:
+    """Promptstring is @runtime_checkable, enabling isinstance checks (R9)."""
+
+    @promptstring
+    def ps(name: str) -> None:
+        """Hello, {name}."""
+
+    assert isinstance(ps, Promptstring)
+
+
+def test_promptstring_generator_satisfies_protocol() -> None:
+    """_PromptStringGenerator also satisfies the Promptstring Protocol (R9)."""
+
+    @promptstring_generator
+    def psg(topic: str):
+        yield f"Tell me about {topic}."
+
+    assert isinstance(psg, Promptstring)
+
+
+def test_promptstring_placeholders_and_declared_parameters_require_no_await() -> None:
+    """placeholders and declared_parameters are accessible without rendering (R3)."""
+
+    @promptstring
+    def ps(name: str, topic: str) -> None:
+        """Tell me about {topic}, {name}."""
+
+    # Both attributes are synchronously accessible.
+    assert ps.placeholders == frozenset({"topic", "name"})
+    assert set(ps.declared_parameters.keys()) == {"name", "topic"}
+
+
+def test_promptstring_generator_declared_parameters_accessible_without_rendering() -> None:
+    """declared_parameters is available immediately after decoration for generators (R3)."""
+    import inspect
+
+    @promptstring_generator
+    def psg(user: str, topic: str):
+        yield Role("system")
+        yield f"You are an assistant discussing {topic}."
+        yield Role("user")
+        yield f"Hi, I am {user}."
+
+    params = psg.declared_parameters
+    assert set(params.keys()) == {"user", "topic"}
+    # Values are inspect.Parameter objects (ADR 0001 Promise 2).
+    assert all(isinstance(p, inspect.Parameter) for p in params.values())
 
 
 # ---------------------------------------------------------------------------
