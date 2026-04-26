@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
+from string.templatelib import Interpolation, Template
 from typing import Any, Literal, Protocol, overload, runtime_checkable
 
 _strict_heuristic_logger = logging.getLogger("promptstrings.strict_heuristic")
@@ -477,21 +478,8 @@ class AwaitPromptDepends:
     resolver: Resolver
 
 
-@dataclass(frozen=True)
-class _CompiledTemplate:
-    """Parsed, immutable representation of a prompt template."""
-
-    parts: tuple[tuple[str, str | None], ...]
-    placeholders: frozenset[str]
-
-    def render(self, values: dict[str, Any]) -> str:
-        """Substitute values into the template and return the rendered string."""
-        chunks: list[str] = []
-        for literal, field_name in self.parts:
-            chunks.append(literal)
-            if field_name is not None:
-                chunks.append(str(values[field_name]))
-        return "".join(chunks)
+_MISSING: object = object()
+"""Sentinel value used in docstring-derived Interpolation objects before render time."""
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -501,16 +489,22 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _compile_template(source: str, *, prompt_name: str = "<unknown>") -> _CompiledTemplate:
-    """Parse a prompt template string into a _CompiledTemplate.
+def _parse_docstring(source: str, *, prompt_name: str = "<unknown>") -> Template:
+    """Parse a docstring template string into a stdlib Template (ADR 0005).
 
-    Raises PromptCompileError for unsupported grammar (format specs, conversions,
-    non-identifier placeholder names).
+    Uses string.Formatter to parse the docstring, applies all grammar guards
+    (no format specs, no conversions, identifier-only placeholders), then
+    constructs a Template with _MISSING sentinels as Interpolation values.
+
+    Raises PromptCompileError for unsupported grammar.
     """
     formatter = Formatter()
-    parts: list[tuple[str, str | None]] = []
-    placeholders: set[str] = set()
+    args: list[str | Interpolation] = []
     for literal, field_name, format_spec, conversion in formatter.parse(source):
+        if literal:
+            args.append(literal)
+        if field_name is None:
+            continue
         if format_spec:
             raise PromptCompileError(
                 f"Format specs are not supported in promptstrings (prompt: {prompt_name!r})",
@@ -527,9 +521,6 @@ def _compile_template(source: str, *, prompt_name: str = "<unknown>") -> _Compil
                 placeholder=field_name,
                 optimize_mode_active=sys.flags.optimize >= 2,
             )
-        parts.append((literal, None))
-        if field_name is None:
-            continue
         if not field_name.isidentifier():
             raise PromptCompileError(
                 f"Promptstring placeholders must use the minimal {{identifier}} grammar "
@@ -539,13 +530,33 @@ def _compile_template(source: str, *, prompt_name: str = "<unknown>") -> _Compil
                 placeholder=field_name,
                 optimize_mode_active=sys.flags.optimize >= 2,
             )
-        placeholders.add(field_name)
-        parts.append(("", field_name))
-    return _CompiledTemplate(parts=tuple(parts), placeholders=frozenset(placeholders))
+        args.append(Interpolation(_MISSING, field_name))
+    return Template(*args) if args else Template("")
 
 
-def _has_prompt_source_return_annotation(fn: Callable[..., Any]) -> bool:
-    """Return True if fn's return annotation proves it returns a PromptSource."""
+def _placeholders_from_template(tpl: Template) -> frozenset[str]:
+    """Extract placeholder names from a docstring-derived Template."""
+    return frozenset(i.expression for i in tpl.interpolations)
+
+
+def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
+    """Render a docstring-derived Template using expression→resolved lookup."""
+    return "".join(
+        item if isinstance(item, str) else str(resolved[item.expression])
+        for item in tpl
+    )
+
+
+def _render_dynamic(tpl: Template) -> str:
+    """Render a t-string-derived Template using already-resolved Interpolation values."""
+    return "".join(
+        item if isinstance(item, str) else str(item.value)
+        for item in tpl
+    )
+
+
+def _has_dynamic_return_annotation(fn: Callable[..., Any]) -> bool:
+    """Return True if fn's return annotation proves it returns PromptSource or Template dynamically."""
     try:
         hints = fn.__annotations__
     except AttributeError:
@@ -553,36 +564,40 @@ def _has_prompt_source_return_annotation(fn: Callable[..., Any]) -> bool:
     return_hint = hints.get("return")
     if return_hint is None:
         return False
-    # Accept the class object itself or the string 'PromptSource'
-    return return_hint is PromptSource or return_hint == "PromptSource"
+    return (
+        return_hint is PromptSource
+        or return_hint == "PromptSource"
+        or return_hint is Template
+        or return_hint == "Template"
+    )
 
 
 def _compile_at_decoration(
     fn: Callable[..., Any],
     prompt_name: str,
-) -> _CompiledTemplate | None:
-    """Attempt to compile a template at decoration time.
+) -> Template | None:
+    """Attempt to compile a template at decoration time (ADR 0005).
 
-    Returns a _CompiledTemplate when the function has a docstring-based template.
-    Returns None when the function is dynamic-source (PromptSource return annotation).
+    Returns a Template when the function has a docstring-based template.
+    Returns None when the function is dynamic-source (PromptSource or Template annotation).
     Raises PromptCompileError immediately when neither condition holds.
     """
     docstring = getattr(fn, "__doc__", None)
     if docstring:
         normalized = textwrap.dedent(docstring).strip()
-        return _compile_template(normalized, prompt_name=prompt_name)
+        return _parse_docstring(normalized, prompt_name=prompt_name)
 
-    # No docstring — check if the function proves it returns a PromptSource dynamically.
-    if _has_prompt_source_return_annotation(fn):
+    # No docstring — check if the function proves it returns a dynamic source.
+    if _has_dynamic_return_annotation(fn):
         # Dynamic source: placeholders cannot be known until render time.
         return None
 
-    # Neither docstring nor PromptSource annotation: fail immediately.
+    # Neither docstring nor dynamic annotation: fail immediately.
     optimize_active = sys.flags.optimize >= 2
     optimize_note = " (docstrings are stripped by python -OO; run without -OO)" if optimize_active else ""
     raise PromptCompileError(
         f"Promptstring {prompt_name!r} has no docstring and its return annotation does not "
-        f"prove a PromptSource is returned.{optimize_note}",
+        f"prove a PromptSource or Template is returned.{optimize_note}",
         prompt_name=prompt_name,
         cause="missing_template",
         placeholder=None,
@@ -635,17 +650,6 @@ async def _resolve_dependencies(
     return resolved
 
 
-def _normalize_source(docstring: str | None, *, prompt_name: str = "<unknown>") -> str:
-    """Normalize a docstring into a trimmed prompt template string."""
-    if not docstring:
-        raise PromptCompileError(
-            f"Promptstring {prompt_name!r} docstring is required when no string source is returned",
-            prompt_name=prompt_name,
-            cause="missing_template",
-            optimize_mode_active=sys.flags.optimize >= 2,
-        )
-    return textwrap.dedent(docstring).strip()
-
 
 class _PromptString:
     """Compiled promptstring backed by a function body or docstring template."""
@@ -659,9 +663,9 @@ class _PromptString:
         self._observer = observer
         self.__name__ = getattr(fn, "__name__", "promptstring")
         self.__doc__ = getattr(fn, "__doc__", None)
-        # Eagerly compile template at decoration time (ADR 0001 Promise 7 and 8).
-        # _compiled is None for dynamic-source functions (PromptSource annotation).
-        self._compiled: _CompiledTemplate | None = _compile_at_decoration(fn, self.__name__)
+        # Eagerly compile template at decoration time (ADR 0001 Promises 7+8, ADR 0005).
+        # _compiled is None for dynamic-source functions (Template/PromptSource annotation).
+        self._compiled: Template | None = _compile_at_decoration(fn, self.__name__)
         # declared_parameters: immutable at decoration time (ADR 0001 Promise 2).
         self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
             inspect.signature(fn).parameters
@@ -669,66 +673,101 @@ class _PromptString:
 
     @property
     def placeholders(self) -> frozenset[str]:
-        """Placeholder names declared in the docstring template.
+        """Placeholder names from the compiled Template (ADR 0005).
 
         Returns frozenset() for dynamic-source functions whose template is not
         known until render time (ADR 0001 non-promise 10).
         """
         if self._compiled is not None:
-            return self._compiled.placeholders
+            return _placeholders_from_template(self._compiled)
         return frozenset()
 
-    async def _resolve_source(self, resolved: dict[str, Any]) -> tuple[PromptSource, bool]:
-        """Call the decorated function and normalize its return value to a PromptSource.
+    async def _resolve_source(self, resolved: dict[str, Any]) -> tuple[Template | PromptSource, bool]:
+        """Call the decorated function and normalize its return value.
 
-        Returns (source, is_docstring_derived). When is_docstring_derived is True,
-        the eagerly-compiled template can be reused; otherwise the source content
-        must be compiled at render time.
+        Returns (template_or_source, is_static). When is_static is True,
+        the eagerly-compiled Template can be reused with _render_static.
+        When False, the returned value is either a Template (use _render_dynamic)
+        or a PromptSource with str content (parse and render via _render_static
+        with a freshly parsed Template).
         """
         source_candidate = await _maybe_await(self._fn(**resolved))
         if source_candidate is None:
-            return PromptSource(content=_normalize_source(self.__doc__, prompt_name=self.__name__)), True
+            # Docstring path — use the eagerly compiled static Template.
+            return self._compiled or PromptSource(content=""), True
+        if isinstance(source_candidate, Template):
+            # T-string return — already resolved, use _render_dynamic.
+            return source_candidate, False
         if isinstance(source_candidate, str):
             return PromptSource(content=source_candidate), False
         if isinstance(source_candidate, PromptSource):
             return source_candidate, False
         raise PromptRenderError(
-            "Promptstring source selector must return None, str, or PromptSource, "
+            "Promptstring source selector must return None, str, Template, or PromptSource, "
             f"got {type(source_candidate)!r}"
         )
-
-    def _get_compiled(self, source: PromptSource, *, is_docstring_derived: bool) -> _CompiledTemplate:
-        """Return the cached compiled template for docstring sources, or compile dynamically."""
-        if is_docstring_derived and self._compiled is not None:
-            return self._compiled
-        # Dynamic source (returned string or PromptSource): compile at render time.
-        return _compile_template(source.content, prompt_name=self.__name__)
 
     async def _render_messages_impl(
         self, ctx: PromptContext
     ) -> list[PromptMessage]:
         """Core rendering logic shared by render() and render_messages()."""
         resolved = await _resolve_dependencies(self._fn, ctx)
-        source, is_docstring_derived = await self._resolve_source(resolved)
-        compiled = self._get_compiled(source, is_docstring_derived=is_docstring_derived)
-        if missing := sorted(name for name in compiled.placeholders if name not in resolved):
-            raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
-        if self._strict:
-            unused_params = sorted(name for name in resolved if name not in compiled.placeholders)
-            if unused_params:
-                raise PromptUnusedParameterError(
-                    "Resolved prompt parameters were not used by the selected source: "
-                    + ", ".join(unused_params),
-                    unused_parameters=tuple(unused_params),
-                    resolved_keys=tuple(sorted(resolved.keys())),
-                )
-        return [
-            PromptMessage(
-                role="system",
-                content=compiled.render(resolved),
-                source=source.provenance,
-            )
-        ]
+        source, is_static = await self._resolve_source(resolved)
+
+        # Determine the Template and render strategy.
+        if is_static:
+            # Docstring-derived static Template: use expression→resolved lookup.
+            assert isinstance(source, Template)
+            tpl = source
+            placeholders = _placeholders_from_template(tpl)
+            if missing := sorted(name for name in placeholders if name not in resolved):
+                raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
+            if self._strict:
+                unused_params = sorted(name for name in resolved if name not in placeholders)
+                if unused_params:
+                    raise PromptUnusedParameterError(
+                        "Resolved prompt parameters were not used by the selected source: "
+                        + ", ".join(unused_params),
+                        unused_parameters=tuple(unused_params),
+                        resolved_keys=tuple(sorted(resolved.keys())),
+                    )
+            content = _render_static(tpl, resolved)
+            provenance = None
+        elif isinstance(source, Template):
+            # T-string-derived dynamic Template: values already resolved.
+            tpl = source
+            placeholders = _placeholders_from_template(tpl)
+            if self._strict:
+                unused_params = sorted(name for name in resolved if name not in placeholders)
+                if unused_params:
+                    raise PromptUnusedParameterError(
+                        "Resolved prompt parameters were not used by the selected source: "
+                        + ", ".join(unused_params),
+                        unused_parameters=tuple(unused_params),
+                        resolved_keys=tuple(sorted(resolved.keys())),
+                    )
+            content = _render_dynamic(tpl)
+            provenance = None
+        else:
+            # PromptSource with str content — parse at render time.
+            assert isinstance(source, PromptSource)
+            tpl = _parse_docstring(source.content, prompt_name=self.__name__)
+            placeholders = _placeholders_from_template(tpl)
+            if missing := sorted(name for name in placeholders if name not in resolved):
+                raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
+            if self._strict:
+                unused_params = sorted(name for name in resolved if name not in placeholders)
+                if unused_params:
+                    raise PromptUnusedParameterError(
+                        "Resolved prompt parameters were not used by the selected source: "
+                        + ", ".join(unused_params),
+                        unused_parameters=tuple(unused_params),
+                        resolved_keys=tuple(sorted(resolved.keys())),
+                    )
+            content = _render_static(tpl, resolved)
+            provenance = source.provenance
+
+        return [PromptMessage(role="system", content=content, source=provenance)]
 
     async def render(self, context: PromptContext | None = None) -> str:
         """Render the prompt to a single string, firing Observer events."""

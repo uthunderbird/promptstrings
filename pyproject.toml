@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Strict prompt-template composition with provenance tracking and dependency injection."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 authors = [
     { name = "Daniyar Supiyev", email = "undead.thunderbird@gmail.com" },
 ]
@@ -55,7 +55,7 @@ ignore = ["E501"]
 known-first-party = ["promptstrings"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 strict = true
 
 [dependency-groups]

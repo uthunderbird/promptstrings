@@ -3,183 +3,227 @@
 - **Status:** Accepted
 - **Date:** 2026-04-26
 - **Deciders:** Daniyar Supiyev
-- **Supersedes:** ADR 0001 (partially — template grammar section only; all other promises and non-promises remain in force)
+- **Supersedes:** ADR 0001 (partially — internal compile representation and render path only; docstring authoring pattern and all other promises remain in force)
 - **Superseded by:** —
 
 ## Context
 
 `promptstrings` targets Python 3.14+. Python 3.14 ships PEP 750 t-strings
-(`t"Hello, {name}"`), which produce a `string.templatelib.Template` object
-instead of a `str`. T-strings carry structured interpolation data: each
-`{expr}` becomes an `Interpolation` with the unevaluated expression, the
-format spec, and the conversion. This is structurally superior to the
-current `string.Formatter`-based parsing approach.
+(`string.templatelib`), which produce a `Template` object carrying structured
+`Interpolation` data instead of a plain `str`.
+
+Investigation established the following facts before this ADR was written:
+
+**What `Template(str)` does NOT do.** `Template('Hello, {name}.')` treats the
+entire string as a single literal — `strings=('Hello, {name}.',)`,
+`interpolations=()`. It does not parse `{name}` as a placeholder. T-strings
+therefore cannot replace docstring parsing — `string.Formatter` is still
+needed to parse the docstring into parts before constructing a `Template`.
+
+**What programmatic `Template` construction gives us.** The constructor
+`Template(*args: str | Interpolation)` accepts interleaved strings and
+`Interpolation` objects. `Interpolation(value, expression, conversion=None,
+format_spec='')` requires a `value` — but a module-level `_MISSING` sentinel
+can be used at decoration time (no real value yet). The `expression` field is
+an arbitrary string ("the arbitrary string provided when constructing the
+interpolation instance," per docs) — not enforced to be an identifier.
+
+**Injection surface.** The current `_CompiledTemplate.render()` is safe: it
+does `str(values[field_name])` and appends — never calls `str.format_map`.
+Attribute traversal (`{topic.__class__}`) is blocked by the `isidentifier()`
+guard at compile time. Second-parse injection (`str.format` re-parsing a value
+containing `{secret}`) does not occur — `str.format` is one-shot. The safety
+is **implicit**: a future refactor to `str.format_map` would silently reopen
+the attribute-leakage door. `Template` makes the safety **explicit by type** —
+`str.format_map(Template)` is a `TypeError`.
+
+**Render path.** A programmatically constructed `Template` (docstring-derived)
+can be rendered via `expression`-lookup in `resolved`:
+
+```python
+''.join(
+    item if isinstance(item, str) else str(resolved[item.expression])
+    for item in tpl
+)
+```
+
+A t-string-derived `Template` (returned from function body) must be rendered
+via `item.value` directly — values are already resolved and the `expression`
+may not match parameter names (`display = name.title(); return t"Hi, {display}."`).
+
+**Performance.** Template iteration is ~35% slower than the current
+`_CompiledTemplate.render()` list-walk (25.6ms vs 19.0ms per 100k renders).
+Absolute difference: ~0.06 µs per render. LLM call latency dominates by
+orders of magnitude — this is not a constraint.
 
 Forces at play:
 
-- **Current grammar is a workaround.** `_compile_template` parses `str`
-  templates via `string.Formatter.parse()` and then re-validates
-  placeholders (identifier check, no format specs, no conversions). This
-  is error-prone and has already produced one compile-error cause
-  (`non_identifier_placeholder`) that exists purely because `str` format
-  grammar is too permissive.
-- **T-strings are structurally stricter.** The Python parser rejects
-  invalid t-string interpolation syntax at parse time, before the library
-  sees it. The library no longer needs to police format specs or
-  conversions — those errors become `SyntaxError` at the call site.
-- **Docstring-based templates cannot become t-strings.** A docstring is
-  always a `str`. The decoration-time parsing path (ADR 0001 Promises 7
-  and 8) works because docstrings are available at import time. With
-  t-strings, the template must be supplied as a return value or an
-  explicit argument — the docstring path becomes secondary (legacy) or is
-  removed.
-- **DX shift.** The primary usage pattern changes from:
-
-  ```python
-  @promptstring
-  def greet(name: str) -> None:
-      """Hello, {name}."""
-  ```
-
-  to:
-
-  ```python
-  @promptstring
-  def greet(name: str) -> Template:
-      return t"Hello, {name}."
-  ```
-
-  This is a breaking change for any caller relying on the docstring
-  pattern. Since the library has not yet made a public 1.0 release, this
-  break is acceptable before tagging.
-
-- **Generator form is unaffected in shape.** `@promptstring_generator`
-  already relies on `yield` expressions rather than a compiled template.
-  The generator body can yield `Template` objects or plain strings;
-  mixing is allowed.
-
-- **`_CompiledTemplate` and `string.Formatter` become dead code.** The
-  current compile pipeline (`_compile_template`, `_CompiledTemplate`,
-  `_normalize_source`, `_get_compiled`, `_resolve_source`) is replaced by
-  direct `Template` rendering.
-
-- **ADR 0004 substring heuristic becomes more precise.** With t-strings,
-  the generator strict-mode heuristic can compare against structured
-  `Interpolation` objects rather than a full-text substring scan. The
-  option (b) `Param` sentinel deferred in ADR 0004 may now be
-  implementable cleanly as a first-class `Interpolation` check. This is
-  tracked as a follow-on decision.
+- **`_CompiledTemplate` is a reinvention of `Template`.** Both store
+  `(strings, placeholder_names)` — `_CompiledTemplate` as a custom frozen
+  dataclass, `Template` as a stdlib type. Replacing the former with the latter
+  removes custom code and aligns the library's internal representation with the
+  stdlib.
+- **Type safety.** `Template` is not a `str`. Code that accidentally uses
+  `str.format_map` on a template object gets a `TypeError` immediately rather
+  than silently leaking object attributes. This prevents a class of future
+  regression.
+- **One internal type for all compiled templates.** Docstring-derived templates
+  and t-string-derived templates currently have different internal types
+  (`_CompiledTemplate` vs. the raw string in `PromptSource`). After this ADR,
+  both are `Template`. Processing code (the render loop, `PromptMessage`
+  construction, future audit fields) handles one type.
+- **Docstring authoring pattern is unchanged.** `"""Hello, {name}."""` stays.
+  T-strings cannot be docstrings: `t"..."` is `Expr(TemplateStr(...))` in the
+  AST, not `Expr(Constant(...))`, so Python never assigns it to `__doc__`.
+- **`isidentifier()` guard is retained.** `Template`/`Interpolation` do not
+  enforce identifier-only expressions. The guard stays in the docstring parse
+  path to produce a clear `PromptCompileError` at decoration time.
 
 ## Decision
 
-**Python 3.14+ t-strings (`string.templatelib.Template`) replace
-`str`-based docstring templates as the primary template grammar for
-`@promptstring`.**
+**Replace `_CompiledTemplate` with `string.templatelib.Template` as the
+library's internal compiled representation. Retain the docstring authoring
+pattern unchanged. Add `Template` as an accepted return type from
+`@promptstring`-decorated functions.**
 
 Specific commitments:
 
-1. **Primary return type is `Template`.** A `@promptstring`-decorated
-   function SHOULD return a `t"..."` t-string. The return annotation
-   changes from `-> None` / `-> PromptSource` to `-> Template` /
-   `-> PromptSource`.
+1. **`_CompiledTemplate` is deleted.** Its role — storing parsed strings and
+   placeholder names — is taken over by `string.templatelib.Template`.
 
-2. **`PromptSource.content` accepts `Template | str`.** This allows
-   external sources (Langfuse, etc.) to supply either a t-string or a
-   plain-string template. When `content` is a `str`, it is rendered via
-   `str.format_map` as before; when it is a `Template`, it is rendered
-   via `string.templatelib` traversal.
+2. **Docstring parse path produces a `Template`.** `_compile_template` (or its
+   successor) parses the docstring via `string.Formatter.parse()`, applies all
+   existing guards (`isidentifier()`, no format specs, no conversions), then
+   constructs and returns a `Template` using a module-level `_MISSING`
+   sentinel as the `value` for each `Interpolation`. `string.Formatter` is
+   still imported and used at decoration time for parsing; it is not removed.
 
-3. **Docstring path is deprecated, not removed, in 1.0.** Functions with
-   a `str` docstring template continue to work but emit a
-   `DeprecationWarning` at decoration time. Removal is scheduled for 2.0.
+   ```python
+   _MISSING = object()  # module-level singleton
 
-4. **`_compile_template`, `_CompiledTemplate`, and `string.Formatter` are
-   removed.** Template rendering goes through a new `_render_template(t:
-   Template, values: dict[str, Any]) -> str` helper that traverses
-   `t.args`.
+   def _parse_docstring(source: str, *, prompt_name: str) -> Template:
+       args: list[str | Interpolation] = []
+       for literal, field_name, fmt_spec, conversion in Formatter().parse(source):
+           if literal:
+               args.append(literal)
+           if field_name is None:
+               continue
+           # existing guards: fmt_spec, conversion, isidentifier()
+           args.append(Interpolation(_MISSING, field_name))
+       return Template(*args)
+   ```
 
-5. **`PromptCompileError` cause `"format_spec"` and `"conversion"` are
-   retired.** These errors are now `SyntaxError` at the call site (Python
-   parser level). The cause `Literal` is narrowed to
-   `"missing_template" | "non_identifier_placeholder"` for the docstring
-   deprecation path; the two retired causes are removed from the public
-   schema in 2.0. In 1.0 they remain in the `Literal` type for backwards
-   compatibility but are never raised.
+3. **Docstring-derived `Template` is rendered via `expression`-lookup.**
 
-6. **`placeholders` on `_PromptString` is populated from the `Template`'s
-   `Interpolation` keys, not from `Formatter.parse()`.** Decoration-time
-   population is preserved: if the function body is a single `return
-   t"..."` expression, the template is extracted at decoration time via
-   `inspect.getsource` + `ast.parse`. If the body is non-trivial, 
-   `placeholders` remains `frozenset()` until first render.
+   ```python
+   def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
+       return ''.join(
+           item if isinstance(item, str) else str(resolved[item.expression])
+           for item in tpl
+       )
+   ```
 
-7. **`requires-python` bumps to `>=3.14`.** The `python_version` mypy
-   setting bumps to `"3.14"`.
+4. **`Template` is accepted as a return type from `@promptstring` functions.**
+   A function annotated `-> Template` (or returning a `Template` at runtime)
+   is treated as a dynamic template. It is rendered via `item.value` — values
+   are already resolved by the time the function is called with its parameters.
 
-8. **`ADR 0001` template grammar promises are superseded here.** All
-   other ADR 0001 promises (Protocol, exceptions, strict mode, DI,
-   observer) remain in force unchanged.
+   ```python
+   def _render_dynamic(tpl: Template) -> str:
+       return ''.join(
+           item if isinstance(item, str) else str(item.value)
+           for item in tpl
+       )
+   ```
+
+5. **Two render strategies, one type.** The library knows which strategy to
+   use by the source of the `Template`:
+   - Docstring-derived (value is `_MISSING`): `_render_static` with `resolved`
+   - T-string-derived (value is real): `_render_dynamic`
+
+   Code that processes templates — `placeholders` property, strict-mode check,
+   future `PromptMessage.interpolations` — handles one type regardless of
+   source.
+
+6. **`placeholders` is populated from `Template.interpolations`.** For
+   docstring-derived templates (compiled at decoration time), `placeholders`
+   returns `frozenset(i.expression for i in tpl.interpolations)` — no change
+   in behavior, but the source changes from `_CompiledTemplate.placeholders`
+   to `Template.interpolations`. For dynamic-source functions (`-> PromptSource`
+   or `-> Template` with non-trivial body), `placeholders` remains
+   `frozenset()` until render time.
+
+7. **`PromptCompileError` causes `"format_spec"` and `"conversion"` are
+   retained.** These are still raised for docstring templates containing
+   `{name:>10}` or `{name!r}`. The t-string path never raises them (Python
+   parser handles format specs and conversions natively for t-strings, which
+   carry them in `Interpolation.format_spec` and `Interpolation.conversion`).
+   The `Literal` type is unchanged.
+
+8. **`requires-python` bumps to `>=3.14`.** The `python_version` mypy setting
+   bumps to `"3.14"`. `string.templatelib` is stdlib in 3.14.
 
 ## Alternatives considered
 
-- **Keep `str` templates, add t-string as opt-in.** Would allow both
-  grammars simultaneously. Rejected: two grammar paths double the
-  compile and render surface, complicate `placeholders` semantics, and
-  undercut the core DX promise of "no surprises." The library is pre-1.0
-  — this is the right moment for the break.
+- **Keep `_CompiledTemplate`, use `Template` only for t-string returns.**
+  Would still require two internal types — `_CompiledTemplate` for docstrings,
+  `Template` for returns. Rejected: no type-safety benefit for the docstring
+  path; future processing code must handle both types. The unification benefit
+  is lost.
 
-- **Accept `Template` only, remove `str` path immediately.** Would be
-  the cleanest design. Rejected: `PromptSource` is used with external
-  content (Langfuse, etc.) that arrives as `str`; forcing those callers
-  to wrap in `t""` adds friction with no benefit. `str` content in
-  `PromptSource` stays.
+- **Parse docstrings directly into `Template` via `Template(str)`.** Does not
+  work — `Template('Hello, {name}.')` treats the entire string as a literal.
+  `string.Formatter` parsing is still required.
 
-- **Use t-strings only in the generator form, keep docstring for
-  `@promptstring`.** Rejected: inconsistent grammar between the two
-  decorator forms is harder to document and harder to type correctly. The
-  migration cost is small given the library is pre-1.0.
+- **Replace docstring authoring with `return t"..."` pattern.** Would make
+  t-strings the primary DX. Rejected: t-strings cannot be docstrings (AST
+  constraint), and the docstring pattern is well-established and unchanged.
+  The t-string return path is an addition, not a replacement.
 
-- **Wait for Python 3.14 adoption to mature before migrating.** Rejected:
-  the library explicitly targets 3.14+ (user decision). Delaying creates
-  a migration cliff after 1.0 is tagged.
+- **Use `None` instead of `_MISSING` sentinel as Interpolation value.**
+  `None` is a valid user value. `_MISSING = object()` is an unforgeable
+  identity-checkable sentinel — preferred for correctness.
 
 ## Consequences
 
 **Positive:**
-- Template grammar errors are `SyntaxError` (Python parser) rather than
-  `PromptCompileError` — fail-faster, better editor integration.
-- `placeholders` is derived from structured `Interpolation` objects, not
-  from fragile string parsing — more reliable.
-- The generator strict-mode heuristic (ADR 0004) can be replaced with
-  a structural check against `Interpolation` keys — eliminates the
-  substring false-positive risk entirely (tracked as follow-on).
-- `_compile_template`, `_CompiledTemplate`, and `string.Formatter` are
-  deleted — net reduction in code.
-- The `cause="format_spec"` and `cause="conversion"` error paths are
-  dead — two test classes and one `Literal` branch retire with them.
+- `_CompiledTemplate` custom dataclass deleted — stdlib `Template` takes its
+  place. Net code reduction.
+- Type safety: `Template` cannot be passed to `str.format_map`. Future
+  refactors that accidentally use `str.format_map` get a `TypeError`
+  immediately.
+- One internal type for all compiled templates — processing code is simpler.
+- `placeholders` populated from `Template.interpolations` — same behavior,
+  no custom parsing needed after decoration.
+- `return t"Hello, {name}."` is now a first-class, supported authoring
+  pattern with full type-checker support.
 
 **Negative:**
-- Breaking change for any caller using the docstring pattern (mitigated
-  by deprecation warning in 1.0, removal in 2.0).
-- `DeprecationWarning` at decoration time adds noise for legacy callers
-  who haven't migrated.
-- `inspect.getsource` + `ast.parse` for decoration-time placeholder
-  extraction is fragile in some environments (frozen modules, `exec`).
-  The `frozenset()` fallback already exists and handles this.
+- `string.Formatter` is NOT removed — still used for docstring parsing.
+- `_render_static` / `_render_dynamic` strategy split must be maintained —
+  two render loops for one type.
+- 35% render overhead vs. current `_CompiledTemplate.render()` list-walk.
+  Absolute: ~0.06 µs per render. Irrelevant for LLM workloads.
+- `_MISSING` sentinel must be a module-level singleton (not per-call
+  `object()`); callers must not inspect `Interpolation.value` on
+  docstring-derived templates.
 
 **Neutral:**
-- `pyproject.toml` `requires-python` and mypy `python_version` must be
+- `requires-python` bumps to `>=3.14`. `pyproject.toml` and mypy config
   updated.
-- All existing tests that use docstring templates must be migrated to
-  `-> Template: return t"..."` pattern, or retained as legacy-path
-  coverage with the deprecation warning suppressed.
-- README quickstart must be rewritten.
-- ADR 0001 `Superseded by` field must be updated to reference this ADR.
+- Existing tests using docstring authoring are unaffected — DX unchanged.
+- `_normalize_source` helper may be removed (its role is absorbed by
+  `_parse_docstring`).
+- ADR 0004 follow-on: generator `yield t"..."` path enables structural
+  strict-mode check via `Interpolation.expression` — tracked as ADR 0006.
 
 ## Notes
 
 - PEP 750: https://peps.python.org/pep-0750/
-- `string.templatelib` module ships in Python 3.14 stdlib.
-- ADR 0004 follow-on: if `Interpolation`-based strict-mode replaces the
-  substring heuristic, a new ADR 0006 should record that decision and
-  supersede ADR 0004.
+- `string.templatelib` docs: https://docs.python.org/3/library/string.templatelib.html
+- `Interpolation.__new__` signature: `(value, expression, conversion=None, format_spec='')`
+- `Template.__new__` signature: `(*args: str | Interpolation)` — consecutive
+  strings concatenated; consecutive interpolations get empty-string separators.
+- Injection analysis: `str.format` does NOT second-parse values (one-shot
+  substitution only). Attribute leakage (`{topic.__class__}`) is blocked by
+  `isidentifier()` guard retained from current implementation.
