@@ -882,6 +882,8 @@ class _PromptStringGenerator:
             messages.append(PromptMessage(role=role, content="\n".join(buffer)))
             buffer.clear()
 
+        template_yields: list[Template] = []
+
         for item in items:
             if isinstance(item, Role):
                 flush()
@@ -894,6 +896,10 @@ class _PromptStringGenerator:
             if isinstance(item, str):
                 buffer.append(item)
                 continue
+            if isinstance(item, Template):
+                template_yields.append(item)
+                buffer.append(_render_dynamic(item))
+                continue
             raise PromptRenderError(
                 f"Unsupported promptstring generator yield type: {type(item)!r}"
             )
@@ -901,27 +907,38 @@ class _PromptStringGenerator:
         flush()
 
         if self._strict:
-            # Warn on values known to produce heuristic failures (ADR 0004, non-contract).
-            for name, value in resolved.items():
-                str_val = str(value)
-                if str_val == "":
-                    _strict_heuristic_logger.warning(
-                        "Parameter %r has an empty str() value; the substring-occurrence "
-                        "check will always report it as used (false negative).",
-                        name,
-                    )
-                elif len(str_val) <= 1:
-                    _strict_heuristic_logger.warning(
-                        "Parameter %r has a single-character str() value %r; the "
-                        "substring-occurrence check has elevated false-positive risk.",
-                        name,
-                        str_val,
-                    )
-            used = {
-                name
-                for name, value in resolved.items()
-                if str(value) in "\n".join(m.content for m in messages)
-            }
+            str_yields = [item for item in items if isinstance(item, str)]
+            all_structured = bool(template_yields) and not str_yields
+            used: frozenset[str]
+            if all_structured:
+                # Structural strict-mode: exact expression check (ADR 0005).
+                used = frozenset(
+                    i.expression
+                    for tpl in template_yields
+                    for i in tpl.interpolations
+                )
+            else:
+                # Substring heuristic (ADR 0004) — for str and mixed yields.
+                for name, value in resolved.items():
+                    str_val = str(value)
+                    if str_val == "":
+                        _strict_heuristic_logger.warning(
+                            "Parameter %r has an empty str() value; the substring-occurrence "
+                            "check will always report it as used (false negative).",
+                            name,
+                        )
+                    elif len(str_val) <= 1:
+                        _strict_heuristic_logger.warning(
+                            "Parameter %r has a single-character str() value %r; the "
+                            "substring-occurrence check has elevated false-positive risk.",
+                            name,
+                            str_val,
+                        )
+                used = frozenset(
+                    name
+                    for name, value in resolved.items()
+                    if str(value) in "\n".join(m.content for m in messages)
+                )
             unused_params = sorted(name for name in resolved if name not in used)
             if unused_params:
                 raise PromptUnreferencedParameterError(
