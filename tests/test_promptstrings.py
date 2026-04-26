@@ -929,3 +929,122 @@ def test_promptstring_generator_supports_async_generator_body() -> None:
     assert len(messages) == 2
     assert messages[0] == PromptMessage(role="system", content="Tell me about Python.")
     assert messages[1] == PromptMessage(role="user", content="Go ahead.")
+
+
+# ---------------------------------------------------------------------------
+# ADR 0005 — Template return and yield paths
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_tstring_return_renders_correctly() -> None:
+    """@promptstring function returning t"..." renders via _render_dynamic (ADR 0005)."""
+    from string.templatelib import Template
+
+    @promptstring
+    def greet(name: str) -> Template:
+        return t"Hello, {name}."
+
+    result = asyncio.run(greet.render(PromptContext({"name": "Alice"})))
+    assert result == "Hello, Alice."
+
+
+def test_promptstring_tstring_return_with_transformed_value() -> None:
+    """_render_dynamic uses item.value, not expression lookup.
+
+    expression='display' != param 'name' — render uses item.value so the
+    transformed value renders correctly. strict=False because 'name' is not
+    in the t-string's expressions (it was transformed into 'display').
+    """
+    from string.templatelib import Template
+
+    @promptstring(strict=False)
+    def greet(name: str) -> Template:
+        display = name.title()
+        return t"Hi, {display}."
+
+    result = asyncio.run(greet.render(PromptContext({"name": "alice"})))
+    assert result == "Hi, Alice."
+
+
+def test_promptstring_tstring_return_strict_mode_passes_when_referenced() -> None:
+    """strict=True: parameter value appears in t-string output — no error (ADR 0005)."""
+    from string.templatelib import Template
+
+    @promptstring(strict=True)
+    def greet(name: str) -> Template:
+        return t"Hello, {name}."
+
+    result = asyncio.run(greet.render(PromptContext({"name": "Bob"})))
+    assert result == "Hello, Bob."
+
+
+def test_promptstring_tstring_return_strict_mode_unused_param() -> None:
+    """strict=True: parameter not in t-string output → PromptStrictnessError (ADR 0005)."""
+    from string.templatelib import Template
+
+    @promptstring(strict=True)
+    def greet(name: str) -> Template:
+        return t"Hello, world."
+
+    with pytest.raises(PromptStrictnessError):
+        asyncio.run(greet.render(PromptContext({"name": "Bob"})))
+
+
+def test_generator_tstring_yield_renders_correctly() -> None:
+    """@promptstring_generator with yield t"..." renders via _render_dynamic (ADR 0005)."""
+
+    @promptstring_generator
+    def gen(topic: str):
+        yield t"Tell me about {topic}."
+
+    messages = asyncio.run(gen.render_messages(PromptContext({"topic": "Python"})))
+    assert len(messages) == 1
+    assert messages[0].content == "Tell me about Python."
+
+
+def test_generator_tstring_yield_mixed_with_str() -> None:
+    """yield t"..." and yield str can be mixed in one generator (ADR 0005)."""
+
+    @promptstring_generator
+    def gen(topic: str):
+        yield "Context:"
+        yield t"Tell me about {topic}."
+
+    messages = asyncio.run(gen.render_messages(PromptContext({"topic": "Python"})))
+    assert len(messages) == 1
+    assert messages[0].content == "Context:\nTell me about Python."
+
+
+def test_generator_tstring_strict_structural_all_template_passes() -> None:
+    """strict=True, all yields Template, param referenced → structural check passes (ADR 0005)."""
+
+    @promptstring_generator(strict=True)
+    def gen(topic: str):
+        yield t"Tell me about {topic}."
+
+    messages = asyncio.run(gen.render_messages(PromptContext({"topic": "Python"})))
+    assert messages[0].content == "Tell me about Python."
+
+
+def test_generator_tstring_strict_structural_unused_param() -> None:
+    """strict=True, all yields Template, param not referenced → PromptUnreferencedParameterError."""
+
+    @promptstring_generator(strict=True)
+    def gen(topic: str):
+        yield t"Hello, world."
+
+    with pytest.raises(PromptUnreferencedParameterError):
+        asyncio.run(gen.render_messages(PromptContext({"topic": "Python"})))
+
+
+def test_generator_tstring_strict_mixed_falls_back_to_heuristic() -> None:
+    """strict=True, mixed str+Template yields → substring heuristic (ADR 0004 path)."""
+
+    @promptstring_generator(strict=True)
+    def gen(topic: str):
+        yield "Context:"
+        yield t"Tell me about {topic}."
+
+    # param value "Python" appears in content → heuristic passes, no error
+    messages = asyncio.run(gen.render_messages(PromptContext({"topic": "Python"})))
+    assert any("Python" in m.content for m in messages)
