@@ -8,6 +8,12 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0006 — Injection safety and template source boundaries](0006-injection-safety-and-template-source-boundaries.md)
+  — Closes four red-team findings: eliminates second-parse injection by making
+  `PromptSource.content` and `-> str` returns literal passthrough; adds
+  mixed-source-mode guards; fixes structural strict-mode false positives;
+  restores error contract in `_render_static`. Partially supersedes ADR 0001 (P0-6).
+  Accepted 2026-04-27.
 - [0005 — T-string template grammar](0005-t-string-template-grammar.md)
   — Replaces `str`-based docstring templates with Python 3.14 t-strings
   as the primary grammar; deprecates docstring path; retires

@@ -76,7 +76,7 @@ class PromptCompileError(PromptRenderError):
     prompt_name: str
     """__name__ of the decorated function; always set."""
 
-    cause: Literal["missing_template", "format_spec", "conversion", "non_identifier_placeholder"]
+    cause: Literal["missing_template", "format_spec", "conversion", "non_identifier_placeholder", "mixed_source_mode"]
     """Discriminator for which compile-time check failed."""
 
     placeholder: str | None
@@ -91,7 +91,7 @@ class PromptCompileError(PromptRenderError):
         *,
         prompt_name: str = "<unknown>",
         cause: Literal[
-            "missing_template", "format_spec", "conversion", "non_identifier_placeholder"
+            "missing_template", "format_spec", "conversion", "non_identifier_placeholder", "mixed_source_mode"
         ] = "missing_template",
         placeholder: str | None = None,
         optimize_mode_active: bool = False,
@@ -541,10 +541,39 @@ def _placeholders_from_template(tpl: Template) -> frozenset[str]:
 
 def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
     """Render a docstring-derived Template using expression→resolved lookup."""
-    return "".join(
-        item if isinstance(item, str) else str(resolved[item.expression])
-        for item in tpl
-    )
+    parts: list[str] = []
+    for item in tpl:
+        if isinstance(item, str):
+            parts.append(item)
+        else:
+            try:
+                parts.append(str(resolved[item.expression]))
+            except KeyError:
+                raise PromptRenderError(
+                    f"Template expression {item.expression!r} has no matching resolved parameter",
+                    missing_key=item.expression,
+                )
+    return "".join(parts)
+
+
+def parse_docstring_template(source: str, *, prompt_name: str = "<unknown>") -> Template:
+    """Parse a template string into a stdlib Template for use in @promptstring functions.
+
+    Applies the same grammar guards as docstring templates: identifier-only
+    placeholders, no format specs, no conversions.
+
+    Use this when loading prompt templates from external sources (database, config
+    system) that need placeholder substitution at render time. Return the resulting
+    Template from a function annotated ``-> Template``.
+
+    .. warning::
+        Do not pass user-controlled strings to this function. The caller is
+        responsible for ensuring *source* is trusted content. Placeholder
+        expressions in the returned Template are substituted at render time from
+        resolved parameters — user-controlled input containing ``{param_name}``
+        syntax will be substituted silently.
+    """
+    return _parse_docstring(source, prompt_name=prompt_name)
 
 
 def _render_dynamic(tpl: Template) -> str:
@@ -584,6 +613,16 @@ def _compile_at_decoration(
     """
     docstring = getattr(fn, "__doc__", None)
     if docstring:
+        # Guard: docstring + dynamic return annotation = mixed source mode (ADR 0006 D2).
+        if _has_dynamic_return_annotation(fn):
+            raise PromptCompileError(
+                f"Promptstring {prompt_name!r} has both a docstring template and a dynamic "
+                f"return annotation; use one or the other.",
+                prompt_name=prompt_name,
+                cause="mixed_source_mode",
+                placeholder=None,
+                optimize_mode_active=sys.flags.optimize >= 2,
+            )
         normalized = textwrap.dedent(docstring).strip()
         return _parse_docstring(normalized, prompt_name=prompt_name)
 
@@ -692,6 +731,12 @@ class _PromptString:
         with a freshly parsed Template).
         """
         source_candidate = await _maybe_await(self._fn(**resolved))
+        # Guard: docstring functions must return None (ADR 0006 D2).
+        if self._compiled is not None and source_candidate is not None:
+            raise PromptRenderError(
+                f"Docstring-based promptstring {self.__name__!r} returned a non-None value "
+                f"at render time. Annotate with -> Template or -> PromptSource for dynamic sources."
+            )
         if source_candidate is None:
             # Docstring path — use the eagerly compiled static Template.
             return self._compiled or PromptSource(content=""), True
@@ -734,37 +779,46 @@ class _PromptString:
             content = _render_static(tpl, resolved)
             provenance = None
         elif isinstance(source, Template):
-            # T-string-derived dynamic Template: values already resolved.
             tpl = source
             placeholders = _placeholders_from_template(tpl)
-            if self._strict:
-                unused_params = sorted(name for name in resolved if name not in placeholders)
-                if unused_params:
-                    raise PromptUnusedParameterError(
-                        "Resolved prompt parameters were not used by the selected source: "
-                        + ", ".join(unused_params),
-                        unused_parameters=tuple(unused_params),
-                        resolved_keys=tuple(sorted(resolved.keys())),
+            # Detect whether this Template came from parse_docstring_template (has _MISSING
+            # sentinel values) or from a real t-string (values already resolved).
+            is_parse_derived = any(
+                i.value is _MISSING for i in tpl.interpolations
+            )
+            if is_parse_derived:
+                # parse_docstring_template path: render via expression→resolved lookup.
+                if missing := sorted(name for name in placeholders if name not in resolved):
+                    raise PromptRenderError(
+                        f"Missing prompt values for placeholders: {', '.join(missing)}"
                     )
-            content = _render_dynamic(tpl)
+                if self._strict:
+                    unused_params = sorted(name for name in resolved if name not in placeholders)
+                    if unused_params:
+                        raise PromptUnusedParameterError(
+                            "Resolved prompt parameters were not used by the selected source: "
+                            + ", ".join(unused_params),
+                            unused_parameters=tuple(unused_params),
+                            resolved_keys=tuple(sorted(resolved.keys())),
+                        )
+                content = _render_static(tpl, resolved)
+            else:
+                # T-string-derived dynamic Template: values already resolved.
+                if self._strict:
+                    unused_params = sorted(name for name in resolved if name not in placeholders)
+                    if unused_params:
+                        raise PromptUnusedParameterError(
+                            "Resolved prompt parameters were not used by the selected source: "
+                            + ", ".join(unused_params),
+                            unused_parameters=tuple(unused_params),
+                            resolved_keys=tuple(sorted(resolved.keys())),
+                        )
+                content = _render_dynamic(tpl)
             provenance = None
         else:
-            # PromptSource with str content — parse at render time.
+            # PromptSource — literal passthrough (ADR 0006 D1).
             assert isinstance(source, PromptSource)
-            tpl = _parse_docstring(source.content, prompt_name=self.__name__)
-            placeholders = _placeholders_from_template(tpl)
-            if missing := sorted(name for name in placeholders if name not in resolved):
-                raise PromptRenderError(f"Missing prompt values for placeholders: {', '.join(missing)}")
-            if self._strict:
-                unused_params = sorted(name for name in resolved if name not in placeholders)
-                if unused_params:
-                    raise PromptUnusedParameterError(
-                        "Resolved prompt parameters were not used by the selected source: "
-                        + ", ".join(unused_params),
-                        unused_parameters=tuple(unused_params),
-                        resolved_keys=tuple(sorted(resolved.keys())),
-                    )
-            content = _render_static(tpl, resolved)
+            content = source.content
             provenance = source.provenance
 
         return [PromptMessage(role="system", content=content, source=provenance)]
@@ -908,7 +962,15 @@ class _PromptStringGenerator:
 
         if self._strict:
             str_yields = [item for item in items if isinstance(item, str)]
-            all_structured = bool(template_yields) and not str_yields
+            all_structured = (
+                bool(template_yields)
+                and not str_yields
+                and all(
+                    i.expression.isidentifier() and i.expression in resolved
+                    for tpl in template_yields
+                    for i in tpl.interpolations
+                )
+            )
             used: frozenset[str]
             if all_structured:
                 # Structural strict-mode: exact expression check (ADR 0005).
