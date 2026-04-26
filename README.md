@@ -80,7 +80,7 @@ def hello(user: str = PromptDepends(current_user)) -> None:
     """Hello, {user}."""
 ```
 
-At most one `AwaitPromptDepends` per render is permitted.
+Multiple `AwaitPromptDepends` resolvers in one render are supported and run concurrently via `asyncio.gather`. Resolvers must be cancellation-safe and must not depend on sibling side-effects.
 
 ## Generator form
 
