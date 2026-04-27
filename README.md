@@ -87,7 +87,7 @@ def hello(
     """Hello, {user}. {profile}"""
 ```
 
-Multiple `AwaitPromptDepends` resolvers run concurrently via `asyncio.gather`. Resolvers must be cancellation-safe.
+Multiple `AwaitPromptDepends` resolvers run concurrently. If one raises, the rest are cancelled before the exception propagates — resolvers can use `try/finally` for cleanup.
 
 ## Integrations
 
@@ -269,8 +269,9 @@ def chat(topic: str):
 
 ## Stability
 
-Pre-1.0. The API is stable in practice (used internally by femtobot) but minor
-breaks may occur before 1.0.
+Stable. The library follows SemVer from 1.0 — breaking changes require a major
+version bump. The full API contract is documented in
+[`design/decisions/0001`](design/decisions/0001-api-and-dx-baseline-for-1.0.md).
 
 ## Design and architecture
 
