@@ -12,9 +12,26 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from string import Formatter
 from string.templatelib import Interpolation, Template
-from typing import Any, Literal, Protocol, overload, runtime_checkable
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    Protocol,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+    runtime_checkable,
+)
 
 _strict_heuristic_logger = logging.getLogger("promptstrings.strict_heuristic")
+
+
+def _annotated_markers(hint: Any) -> list[Any]:
+    """Return Annotated metadata items for a hint, or [] if not Annotated."""
+    if get_origin(hint) is Annotated:
+        return list(get_args(hint)[1:])
+    return []
 
 
 class PromptRenderError(RuntimeError):
@@ -651,12 +668,20 @@ def _compile_at_decoration(
 async def _resolve_dependencies(
     fn: Callable[..., Any],
     context: PromptContext,
+    *,
+    hints: dict[str, Any],
 ) -> dict[str, Any]:
     """Resolve all declared parameters for fn using the given context.
 
-    Sync PromptDepends run sequentially in declaration order.
-    AwaitPromptDepends run concurrently via asyncio.gather; the first exception
-    cancels the rest (ADR 0001 Promise 9). No limit on async dep count.
+    Resolution priority per parameter:
+    1. Annotated[T, AwaitPromptDepends(resolver)] — async, collected for gather
+    2. Annotated[T, PromptDepends(resolver)] — sync resolver
+    3. parameter.default is AwaitPromptDepends / PromptDepends (silent deprecated)
+    4. name in context.values — direct value lookup
+    5. parameter.default (Python default) or raise PromptRenderError
+
+    AwaitPromptDepends resolvers (steps 1 and 3) run concurrently via
+    asyncio.gather; the first exception cancels the rest (ADR 0001 Promise 9).
     """
     signature = inspect.signature(fn)
     resolved: dict[str, Any] = {}
@@ -664,18 +689,37 @@ async def _resolve_dependencies(
     async_coros: list[Any] = []
 
     for name, parameter in signature.parameters.items():
+        markers = _annotated_markers(hints.get(name))
+
+        # Step 1: Annotated[T, AwaitPromptDepends(resolver)]
+        await_dep = next((m for m in markers if isinstance(m, AwaitPromptDepends)), None)
+        if await_dep is not None:
+            async_names.append(name)
+            async_coros.append(await_dep.resolver(context))
+            continue
+
+        # Step 2: Annotated[T, PromptDepends(resolver)]
+        sync_dep = next((m for m in markers if isinstance(m, PromptDepends)), None)
+        if sync_dep is not None:
+            resolved[name] = await _maybe_await(sync_dep.resolver(context))
+            continue
+
+        # Step 3: default-value PromptDepends / AwaitPromptDepends (silent deprecated)
         default = parameter.default
         if isinstance(default, AwaitPromptDepends):
-            # Collect coroutines; run all concurrently after sync deps.
             async_names.append(name)
             async_coros.append(default.resolver(context))
             continue
         if isinstance(default, PromptDepends):
             resolved[name] = await _maybe_await(default.resolver(context))
             continue
+
+        # Step 4: context.values
         if name in context.values:
             resolved[name] = context.values[name]
             continue
+
+        # Step 5: Python default or raise
         if default is inspect.Parameter.empty:
             raise PromptRenderError(
                 f"Unable to resolve prompt parameter: {name}",
@@ -713,12 +757,24 @@ class _PromptString:
         self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
             inspect.signature(fn).parameters
         )
-        # Params with PromptDepends/AwaitPromptDepends defaults are exempt from unused checks:
-        # they may be resolved for side effects without being referenced in the template.
+        # Cache type hints at decoration time (ADR 0007 D1). Fall back to {} if
+        # a return annotation references a name not resolvable in fn's module globals.
+        try:
+            self._hints: dict[str, Any] = get_type_hints(fn, include_extras=True)
+        except (NameError, AttributeError):
+            self._hints = {}
+        # Params with PromptDepends/AwaitPromptDepends are exempt from unused checks —
+        # detected in both default slot (silent deprecated) and Annotated metadata (primary).
         self._dep_params: frozenset[str] = frozenset(
             name
             for name, param in self.declared_parameters.items()
-            if isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+            if (
+                isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+                or any(
+                    isinstance(m, (PromptDepends, AwaitPromptDepends))
+                    for m in _annotated_markers(self._hints.get(name))
+                )
+            )
         )
 
     @property
@@ -767,7 +823,7 @@ class _PromptString:
         self, ctx: PromptContext
     ) -> list[PromptMessage]:
         """Core rendering logic shared by render() and render_messages()."""
-        resolved = await _resolve_dependencies(self._fn, ctx)
+        resolved = await _resolve_dependencies(self._fn, ctx, hints=self._hints)
         source, is_static = await self._resolve_source(resolved)
 
         # Determine the Template and render strategy.
@@ -935,11 +991,24 @@ class _PromptStringGenerator:
         self.declared_parameters: Mapping[str, inspect.Parameter] = dict(
             inspect.signature(fn).parameters
         )
-        # Params with PromptDepends/AwaitPromptDepends defaults are exempt from unused checks.
+        # Cache type hints at decoration time (ADR 0007 D1). Fall back to {} if
+        # a return annotation references a name not resolvable in fn's module globals.
+        try:
+            self._hints: dict[str, Any] = get_type_hints(fn, include_extras=True)
+        except (NameError, AttributeError):
+            self._hints = {}
+        # Params with PromptDepends/AwaitPromptDepends are exempt from unused checks —
+        # detected in both default slot (silent deprecated) and Annotated metadata (primary).
         self._dep_params: frozenset[str] = frozenset(
             name
             for name, param in self.declared_parameters.items()
-            if isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+            if (
+                isinstance(param.default, (PromptDepends, AwaitPromptDepends))
+                or any(
+                    isinstance(m, (PromptDepends, AwaitPromptDepends))
+                    for m in _annotated_markers(self._hints.get(name))
+                )
+            )
         )
 
     @property
@@ -949,7 +1018,7 @@ class _PromptStringGenerator:
 
     async def _render_messages_impl(self, ctx: PromptContext) -> list[PromptMessage]:
         """Core rendering logic shared by render() and render_messages()."""
-        resolved = await _resolve_dependencies(self._fn, ctx)
+        resolved = await _resolve_dependencies(self._fn, ctx, hints=self._hints)
         generator = self._fn(**resolved)
         if inspect.isasyncgen(generator):
             items = [item async for item in generator]
