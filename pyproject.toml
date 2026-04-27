@@ -1,6 +1,6 @@
 [project]
 name = "promptstrings"
-version = "1.1.0"
+version = "1.2.0"
 description = "Strict prompt-template composition with provenance tracking and dependency injection."
 readme = "README.md"
 license = { file = "LICENSE" }
