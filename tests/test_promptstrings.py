@@ -6,9 +6,11 @@ Covers ADR 0001–0004 promises and DX rubric R1–R16.
 from __future__ import annotations
 
 import asyncio
+from string.templatelib import Template as _Template
 from typing import Annotated
 
 import pytest
+from pydantic import BaseModel as _BaseModel
 
 from promptstrings import (
     AwaitPromptDepends,
@@ -1501,3 +1503,82 @@ async def test_failing_async_resolver_propagates_original_exception_type() -> No
 
     with pytest.raises(RuntimeError, match="original message"):
         await prompt.render(PromptContext())
+
+
+# ---------------------------------------------------------------------------
+# ADR 0009 — response_schema property
+# Module-level models are required: under PEP 563 (from __future__ import
+# annotations), return annotations become strings and get_type_hints resolves
+# them against fn.__globals__. Locally-defined classes are not in globals.
+# ---------------------------------------------------------------------------
+
+class _InvoiceModel(_BaseModel):
+    amount: float
+
+
+class _ItemModel(_BaseModel):
+    name: str
+
+
+class _SummaryModel(_BaseModel):
+    text: str
+
+
+def test_response_schema_returns_user_defined_class() -> None:
+    """response_schema exposes a user-defined return annotation."""
+
+    @promptstring
+    def extract(text: str) -> _InvoiceModel:  # type: ignore[return]
+        """Extract from: {text}"""
+
+    assert extract.response_schema is _InvoiceModel
+
+
+def test_response_schema_is_none_for_none_return() -> None:
+    """response_schema is None when return annotation is None."""
+
+    @promptstring
+    def prompt(name: str) -> None:
+        """Hello, {name}!"""
+
+    assert prompt.response_schema is None
+
+
+def test_response_schema_is_none_for_ellipsis_return() -> None:
+    """response_schema is None when return annotation is ..."""
+
+    @promptstring
+    def prompt(name: str) -> ...:  # type: ignore[return]
+        """Hello, {name}!"""
+
+    assert prompt.response_schema is None
+
+
+def test_response_schema_is_none_for_template_return() -> None:
+    """response_schema is None for -> Template (internal dynamic-source type)."""
+
+    @promptstring
+    def prompt(name: str) -> _Template:
+        return t"Hello, {name}!"
+
+    assert prompt.response_schema is None
+
+
+def test_response_schema_generic_alias() -> None:
+    """response_schema passes through list[Model] (GenericAlias) as-is."""
+
+    @promptstring(strict=False)
+    def extract(text: str) -> list[_ItemModel]:  # type: ignore[return]
+        """Extract items from: {text}"""
+
+    assert extract.response_schema == list[_ItemModel]
+
+
+def test_response_schema_available_on_generator() -> None:
+    """response_schema works on promptstring_generator too."""
+
+    @promptstring_generator
+    def gen(topic: str) -> _SummaryModel:  # type: ignore[return]
+        yield f"Summarise {topic}."
+
+    assert gen.response_schema is _SummaryModel

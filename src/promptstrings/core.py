@@ -30,27 +30,46 @@ _MISSING: object = object()
 
 
 def _get_param_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
-    """Return get_type_hints for fn's parameters only, excluding the return annotation.
+    """Return get_type_hints for fn, with best-effort return annotation resolution.
 
-    If get_type_hints raises NameError or AttributeError on the full annotation dict,
-    retry without the return annotation — it may reference a locally-imported name
-    (e.g. Template imported inside a test function body) that is absent from fn.__globals__
-    but harmless for DI-marker detection.
+    Under PEP 563 (from __future__ import annotations), annotations are strings.
+    get_type_hints resolves them against fn.__globals__. Local types (defined inside
+    a function body) are absent from globals and cause NameError.
 
-    If the retry also fails, the NameError originates from a param annotation and is
-    re-raised immediately (fail-fast at decoration time per ADR 0007 D1).
+    Strategy:
+    1. Try the full dict (fast path — works when all types are importable globals).
+    2. On failure, resolve params-only (strip return). If that fails, NameError is
+       from a param annotation — re-raise immediately (ADR 0007 D1 fail-fast).
+    3. Attempt to resolve the return annotation separately using eval against
+       fn.__globals__. On success, merge it back. On failure, use the raw annotation
+       value (string or actual type) — _response_schema_from_hints handles both.
     """
     try:
         return get_type_hints(fn, include_extras=True)
     except (NameError, AttributeError):
-        orig = fn.__annotations__
-        fn.__annotations__ = {k: v for k, v in orig.items() if k != "return"}
-        try:
-            return get_type_hints(fn, include_extras=True)
-        except (NameError, AttributeError):
-            raise
-        finally:
-            fn.__annotations__ = orig
+        pass
+
+    orig = fn.__annotations__
+    fn.__annotations__ = {k: v for k, v in orig.items() if k != "return"}
+    try:
+        hints = get_type_hints(fn, include_extras=True)
+    except (NameError, AttributeError):
+        raise
+    finally:
+        fn.__annotations__ = orig
+
+    # Attempt to resolve the return annotation separately.
+    raw_return = orig.get("return")
+    if raw_return is not None:
+        if isinstance(raw_return, str):
+            try:
+                hints["return"] = eval(raw_return, fn.__globals__)  # noqa: S307
+            except Exception:
+                hints["return"] = raw_return
+        else:
+            hints["return"] = raw_return
+
+    return hints
 
 
 def _annotated_markers(hint: Any) -> list[Any]:
@@ -58,6 +77,27 @@ def _annotated_markers(hint: Any) -> list[Any]:
     if get_origin(hint) is Annotated:
         return list(get_args(hint)[1:])
     return []
+
+
+# Internal return types that signal template-path behaviour, not an output schema.
+_INTERNAL_RETURN_TYPES: tuple[Any, ...] = (type(None), type(...))
+
+
+def _response_schema_from_hints(hints: dict[str, Any]) -> Any:
+    """Extract response_schema from resolved type hints (ADR 0009).
+
+    Returns the raw return annotation for user-defined types (e.g. MyModel,
+    list[MyModel]). Returns None for promptstrings-internal return types:
+    NoneType, Ellipsis, str, Template, PromptSource.
+    """
+    ret = hints.get("return")
+    if ret is None or ret is ...:
+        return None
+    if ret is type(None) or ret is type(...):
+        return None
+    if ret is str or ret is Template or ret is PromptSource:
+        return None
+    return ret
 
 
 class PromptRenderError(RuntimeError):
@@ -421,6 +461,14 @@ class Promptstring(Protocol):
     declared_parameters: Mapping[str, inspect.Parameter]
     """Declared parameters of the underlying function, keyed by name."""
 
+    response_schema: Any
+    """Return annotation of the underlying function, or None for internal types (ADR 0009).
+
+    Pass to LLM framework structured-output arguments (e.g. instructor's
+    response_model, OpenAI's response_format). None when the prompt has no
+    user-defined return type (-> None, -> ..., -> Template, -> PromptSource).
+    """
+
     async def render(self, context: PromptContext | None = None) -> str:
         """Render the prompt to a single string."""
         ...
@@ -631,20 +679,35 @@ def _render_dynamic(tpl: Template) -> str:
 
 
 def _has_dynamic_return_annotation(fn: Callable[..., Any]) -> bool:
-    """Return True if fn's return annotation proves it returns PromptSource or Template dynamically."""
+    """Return True if fn's return annotation proves it returns PromptSource or Template dynamically.
+
+    Checks both the raw __annotations__ entry (for non-PEP-563 code) and a
+    best-effort resolved form (for PEP-563 / from __future__ import annotations
+    code where annotations are strings).
+    """
     try:
-        hints = fn.__annotations__
+        raw = fn.__annotations__
     except AttributeError:
         return False
-    return_hint = hints.get("return")
+
+    return_hint = raw.get("return")
     if return_hint is None or return_hint is ... or return_hint == "...":
         return False
-    return (
-        return_hint is PromptSource
-        or return_hint == "PromptSource"
-        or return_hint is Template
-        or return_hint == "Template"
-    )
+
+    # Fast path: annotation is already the class (no PEP 563)
+    if return_hint is PromptSource or return_hint is Template:
+        return True
+
+    # Slow path: annotation is a string (PEP 563) — resolve against fn globals
+    if isinstance(return_hint, str):
+        try:
+            resolved = eval(return_hint, fn.__globals__)  # noqa: S307
+            return resolved is PromptSource or resolved is Template
+        except Exception:
+            # Common string aliases used in docstrings / tests
+            return return_hint in ("PromptSource", "Template")
+
+    return False
 
 
 def _compile_at_decoration(
@@ -810,6 +873,7 @@ class _PromptString:
                 )
             )
         )
+        self.response_schema: Any = _response_schema_from_hints(self._hints)
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -1041,6 +1105,7 @@ class _PromptStringGenerator:
                 )
             )
         )
+        self.response_schema: Any = _response_schema_from_hints(self._hints)
 
     @property
     def placeholders(self) -> frozenset[str]:

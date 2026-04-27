@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** YYYY-MM-DD
+- **Target version:** X.Y.Z
 - **Deciders:** <names or roles>
 - **Supersedes:** —
 - **Superseded by:** —
