@@ -1391,3 +1391,49 @@ def test_promptstring_ellipsis_and_none_annotation_both_allow_placeholders() -> 
         """Hello, {name}!"""
 
     assert p_none.placeholders == p_ellipsis.placeholders == frozenset({"name"})
+
+
+def test_param_annotation_name_error_raises_at_decoration_time() -> None:
+    """T6: NameError in a param annotation fails at decoration, not at render time.
+
+    If a param annotation references a name absent from fn's module globals
+    (e.g. a locally-defined class), get_type_hints raises NameError.
+    The library must re-raise immediately rather than silently swallowing it
+    — otherwise the PromptDepends marker is lost and render fails with a
+    confusing 'unable to resolve' error instead of a clear decoration-time failure.
+    """
+    import types
+
+    # Build a function whose param annotation references a name not in its globals.
+    # We do this via exec into a fresh module namespace so the NameError is real.
+    mod = types.ModuleType("_test_param_nameerror_mod")
+    exec(
+        "from promptstrings import promptstring, PromptDepends\n"
+        "from typing import Annotated\n"
+        "def prompt(name: 'Annotated[NonExistent, PromptDepends(lambda ctx: \"x\")]') -> None:\n"
+        "    '''Hello, {name}!'''\n",
+        mod.__dict__,
+    )
+    with pytest.raises(NameError):
+        mod.__dict__["promptstring"](mod.__dict__["prompt"])
+
+
+def test_return_annotation_name_error_does_not_raise_at_decoration() -> None:
+    """T7: NameError only in the return annotation is tolerated at decoration time.
+
+    A locally-imported type in -> ReturnType (e.g. Template imported inside a
+    test function body) must not prevent decoration — the return annotation is
+    irrelevant to DI-marker detection.
+    """
+    import types
+
+    mod = types.ModuleType("_test_return_nameerror_mod")
+    exec(
+        "from promptstrings import promptstring, PromptDepends\n"
+        "def prompt(name: str = PromptDepends(lambda ctx: 'Ada')) -> 'NonExistentReturn':\n"
+        "    '''Hello, {name}!'''\n",
+        mod.__dict__,
+    )
+    # Must not raise — return annotation NameError is tolerated.
+    decorated = mod.__dict__["promptstring"](mod.__dict__["prompt"])
+    assert decorated is not None

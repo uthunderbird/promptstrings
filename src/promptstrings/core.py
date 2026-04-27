@@ -26,6 +26,32 @@ from typing import (
 
 _strict_heuristic_logger = logging.getLogger("promptstrings.strict_heuristic")
 
+_MISSING: object = object()
+
+
+def _get_param_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
+    """Return get_type_hints for fn's parameters only, excluding the return annotation.
+
+    If get_type_hints raises NameError or AttributeError on the full annotation dict,
+    retry without the return annotation — it may reference a locally-imported name
+    (e.g. Template imported inside a test function body) that is absent from fn.__globals__
+    but harmless for DI-marker detection.
+
+    If the retry also fails, the NameError originates from a param annotation and is
+    re-raised immediately (fail-fast at decoration time per ADR 0007 D1).
+    """
+    try:
+        return get_type_hints(fn, include_extras=True)
+    except (NameError, AttributeError):
+        orig = fn.__annotations__
+        fn.__annotations__ = {k: v for k, v in orig.items() if k != "return"}
+        try:
+            return get_type_hints(fn, include_extras=True)
+        except (NameError, AttributeError):
+            raise
+        finally:
+            fn.__annotations__ = orig
+
 
 def _annotated_markers(hint: Any) -> list[Any]:
     """Return Annotated metadata items for a hint, or [] if not Annotated."""
@@ -495,7 +521,6 @@ class AwaitPromptDepends:
     resolver: Resolver
 
 
-_MISSING: object = object()
 """Sentinel value used in docstring-derived Interpolation objects before render time."""
 
 
@@ -759,10 +784,7 @@ class _PromptString:
         )
         # Cache type hints at decoration time (ADR 0007 D1). Fall back to {} if
         # a return annotation references a name not resolvable in fn's module globals.
-        try:
-            self._hints: dict[str, Any] = get_type_hints(fn, include_extras=True)
-        except (NameError, AttributeError):
-            self._hints = {}
+        self._hints: dict[str, Any] = _get_param_type_hints(fn)
         # Params with PromptDepends/AwaitPromptDepends are exempt from unused checks —
         # detected in both default slot (silent deprecated) and Annotated metadata (primary).
         self._dep_params: frozenset[str] = frozenset(
@@ -993,10 +1015,7 @@ class _PromptStringGenerator:
         )
         # Cache type hints at decoration time (ADR 0007 D1). Fall back to {} if
         # a return annotation references a name not resolvable in fn's module globals.
-        try:
-            self._hints: dict[str, Any] = get_type_hints(fn, include_extras=True)
-        except (NameError, AttributeError):
-            self._hints = {}
+        self._hints: dict[str, Any] = _get_param_type_hints(fn)
         # Params with PromptDepends/AwaitPromptDepends are exempt from unused checks —
         # detected in both default slot (silent deprecated) and Annotated metadata (primary).
         self._dep_params: frozenset[str] = frozenset(
