@@ -24,6 +24,24 @@ jobs:
       - name: Type-check
         run: uv run mypy src/
 
+  examples:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+      - name: Install
+        run: uv sync --all-extras
+      - name: Run examples
+        run: |
+          for f in examples/[0-9]*.py; do
+            echo "--- $f ---"
+            uv run python "$f"
+          done
+
   build:
     runs-on: ubuntu-latest
     needs: test

@@ -32,6 +32,10 @@ dev = [
 ]
 dishka = ["dishka>=1.0"]
 pydantic = ["pydantic>=2.0,<3.0"]
+examples = [
+    "pydantic>=2.0,<3.0",
+    "dishka>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]
