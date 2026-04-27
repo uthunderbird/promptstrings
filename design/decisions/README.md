@@ -8,6 +8,11 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0011 — Template composition safety](0011-template-composition-safety.md)
+  — Guarantees no second-parse injection in all render path combinations;
+  adds `Promptstring`-object guard in `_render_static` / `_render_dynamic`;
+  documents shared-`PromptContext` naming discipline; adds composition example.
+  Target version 1.3.0. Accepted 2026-04-27.
 - [0010 — Examples infrastructure](0010-examples-infrastructure.md)
   — `examples/` directory with 10 numbered self-contained scripts, `FakeLLMClient` mock,
   `examples` optional-dependency group, and a dedicated CI job. Target version 1.3.0.
