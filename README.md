@@ -14,8 +14,8 @@ gives you:
   (opt-in via `strict=True`, default for `@promptstring`).
 - **Provenance**: each rendered message carries a `PromptSourceProvenance`
   describing where its template came from (id, version, hash, provider).
-- **Dependency injection**: declare prompt parameters with `PromptDepends(...)`
-  or `AwaitPromptDepends(...)` and resolve them from a `PromptContext` at
+- **Dependency injection**: declare prompt parameters with `Annotated[T, PromptDepends(...)]`
+  or `Annotated[T, AwaitPromptDepends(...)]` and resolve them from a `PromptContext` at
   render time.
 - **Two render shapes**: a single string, or a list of `PromptMessage` objects
   for chat-style APIs.
@@ -67,20 +67,72 @@ Pass `strict=False` to opt out.
 
 ## Dependency injection
 
-Use `PromptDepends` for sync resolvers and `AwaitPromptDepends` for async ones.
+Declare resolver dependencies using `typing.Annotated`:
 
 ```python
-from promptstrings import promptstring, PromptDepends, PromptContext
+from typing import Annotated
+from promptstrings import promptstring, PromptDepends, AwaitPromptDepends, PromptContext
 
 def current_user(ctx: PromptContext) -> str:
     return ctx.require("user_name")
 
+async def load_profile(ctx: PromptContext) -> str:
+    return await fetch_profile(ctx.require("user_id"))
+
 @promptstring
-def hello(user: str = PromptDepends(current_user)) -> None:
-    """Hello, {user}."""
+def hello(
+    user: Annotated[str, PromptDepends(current_user)],
+    profile: Annotated[str, AwaitPromptDepends(load_profile)],
+) -> None:
+    """Hello, {user}. {profile}"""
 ```
 
-Multiple `AwaitPromptDepends` resolvers in one render are supported and run concurrently via `asyncio.gather`. Resolvers must be cancellation-safe and must not depend on sibling side-effects.
+Multiple `AwaitPromptDepends` resolvers run concurrently via `asyncio.gather`. Resolvers must be cancellation-safe.
+
+## Integrations
+
+### dishka
+
+```
+pip install promptstrings[dishka]
+```
+
+Use `DishkaContext` to pass a dishka `AsyncContainer`, and `From(Type)` as an `Annotated` marker to resolve from it:
+
+```python
+from typing import Annotated
+from promptstrings import promptstring, PromptContext
+from promptstrings.integrations.dishka import DishkaContext, From
+
+@promptstring
+def greet(user: Annotated[User, From(User)]) -> None:
+    """Hello, {user.name}!"""
+
+ctx = DishkaContext(container=my_container)
+result = await greet.render(ctx)
+```
+
+### pydantic
+
+```
+pip install promptstrings[pydantic]
+```
+
+`PydanticPromptContext.from_model()` populates context values from a Pydantic v2 model:
+
+```python
+from pydantic import BaseModel
+from promptstrings.integrations.pydantic import PydanticPromptContext
+
+class Request(BaseModel):
+    user: str
+    topic: str
+
+ctx = PydanticPromptContext.from_model(Request(user="Ada", topic="AI"))
+result = await my_prompt.render(ctx)
+```
+
+Pass `dump_mode='json'` to serialize datetimes and other types to JSON-compatible values.
 
 ## Generator form
 
