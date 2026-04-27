@@ -6,6 +6,7 @@ Covers ADR 0001–0004 promises and DX rubric R1–R16.
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
 import pytest
 
@@ -31,6 +32,7 @@ from promptstrings import (
     promptstring,
     promptstring_generator,
 )
+from promptstrings.integrations.dishka import From as _dishka_From
 
 # ---------------------------------------------------------------------------
 # Basic rendering
@@ -1206,3 +1208,144 @@ def test_parse_trusted_template_public_utility() -> None:
 
     result = asyncio.run(ps.render(PromptContext({"name": "Ada", "role": "engineer"})))
     assert result == "Hello, Ada. Your role is engineer."
+
+
+# ---------------------------------------------------------------------------
+# ADR 0007 — Annotated DI syntax and integrations (T1–T12)
+# ---------------------------------------------------------------------------
+
+
+def test_annotated_prompt_depends_resolves() -> None:
+    """T1: Annotated[str, PromptDepends(f)] resolves correctly."""
+
+    @promptstring
+    def prompt(name: Annotated[str, PromptDepends(lambda ctx: "Ada")]) -> None:
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext()))
+    assert result == "Hello, Ada!"
+
+
+async def _test_get_name(ctx: PromptContext) -> str:
+    return "Ada"
+
+
+def test_annotated_await_prompt_depends_resolves() -> None:
+    """T2: Annotated[str, AwaitPromptDepends(f)] resolves correctly."""
+
+    @promptstring
+    def prompt(name: Annotated[str, AwaitPromptDepends(_test_get_name)]) -> None:
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext()))
+    assert result == "Hello, Ada!"
+
+
+def test_annotated_dep_param_exempt_from_strict() -> None:
+    """T3: Annotated dep param not in template is exempt from strict unused check."""
+
+    @promptstring
+    def prompt(
+        name: str,
+        _side: Annotated[None, PromptDepends(lambda ctx: None)],
+    ) -> None:
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    assert result == "Hello, Ada!"
+
+
+def test_default_value_prompt_depends_still_works() -> None:
+    """T4: Default-value PromptDepends still resolves (silent deprecated path)."""
+
+    @promptstring
+    def prompt(name: str = PromptDepends(lambda ctx: "Ada")) -> None:  # type: ignore[assignment]
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext()))
+    assert result == "Hello, Ada!"
+
+
+def test_annotated_takes_priority_over_context_values() -> None:
+    """T5: Annotated resolver wins over context.values for the same name."""
+
+    @promptstring
+    def prompt(name: Annotated[str, PromptDepends(lambda ctx: "FromAnnotated")]) -> None:
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext({"name": "FromContext"})))
+    assert result == "Hello, FromAnnotated!"
+
+
+def test_pydantic_context_rejects_non_model() -> None:
+    """T10: PydanticPromptContext.from_model raises TypeError for non-BaseModel."""
+    from promptstrings.integrations.pydantic import PydanticPromptContext
+
+    with pytest.raises(TypeError, match="Expected a pydantic.BaseModel instance"):
+        PydanticPromptContext.from_model("not a model")  # type: ignore[arg-type]
+
+
+def test_pydantic_context_python_dump_mode() -> None:
+    """T11a: from_model(mode='python') keeps Python types (datetime stays datetime)."""
+    from datetime import datetime
+
+    from pydantic import BaseModel
+
+    from promptstrings.integrations.pydantic import PydanticPromptContext
+
+    class M(BaseModel):
+        ts: datetime
+
+    ctx = PydanticPromptContext.from_model(M(ts=datetime(2026, 1, 1)))
+    assert isinstance(ctx.values["ts"], datetime)
+
+
+def test_pydantic_context_json_dump_mode() -> None:
+    """T11b: from_model(mode='json') serializes datetime to ISO string."""
+    from datetime import datetime
+
+    from pydantic import BaseModel
+
+    from promptstrings.integrations.pydantic import PydanticPromptContext
+
+    class M(BaseModel):
+        ts: datetime
+
+    ctx = PydanticPromptContext.from_model(M(ts=datetime(2026, 1, 1)), dump_mode="json")
+    assert isinstance(ctx.values["ts"], str)
+
+
+def test_pydantic_context_from_model_populates_values() -> None:
+    """T11c: from_model populates values from model fields."""
+    from pydantic import BaseModel
+
+    from promptstrings.integrations.pydantic import PydanticPromptContext
+
+    class User(BaseModel):
+        name: str
+        age: int
+
+    ctx = PydanticPromptContext.from_model(User(name="Ada", age=30))
+    assert ctx.values == {"name": "Ada", "age": 30}
+
+
+def test_dishka_context_merges_extras() -> None:
+    """T9: DishkaContext.__post_init__ merges extras non-destructively."""
+    from promptstrings.integrations.dishka import _CONTAINER_KEY, DishkaContext
+
+    sentinel = object()
+    ctx = DishkaContext(extras={"tracer": "otel"}, container=sentinel)  # type: ignore[arg-type]
+    assert "tracer" in ctx.extras
+    assert _CONTAINER_KEY in ctx.extras
+    assert ctx.extras[_CONTAINER_KEY] is sentinel
+
+
+def test_from_without_dishka_context_raises_key_error() -> None:
+    """T8: From() raises KeyError when context is plain PromptContext (no container)."""
+
+    @promptstring
+    def prompt(user: Annotated[str, _dishka_From(str)]) -> None:
+        """Hello, {user}!"""
+
+    with pytest.raises(KeyError):
+        asyncio.run(prompt.render(PromptContext()))
