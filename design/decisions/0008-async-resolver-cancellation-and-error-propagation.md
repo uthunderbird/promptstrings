@@ -1,6 +1,6 @@
 # 0008 — Async resolver cancellation and error propagation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-27
 - **Deciders:** Daniyar Supiyev
 - **Supersedes:** —

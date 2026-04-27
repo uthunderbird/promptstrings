@@ -706,7 +706,7 @@ async def _resolve_dependencies(
     5. parameter.default (Python default) or raise PromptRenderError
 
     AwaitPromptDepends resolvers (steps 1 and 3) run concurrently via
-    asyncio.gather; the first exception cancels the rest (ADR 0001 Promise 9).
+    asyncio.wait; the first exception cancels all siblings (ADR 0001 P9, ADR 0008).
     """
     signature = inspect.signature(fn)
     resolved: dict[str, Any] = {}
@@ -754,10 +754,22 @@ async def _resolve_dependencies(
         resolved[name] = default
 
     if async_coros:
-        # Run all AwaitPromptDepends concurrently; first exception cancels rest.
-        results = await asyncio.gather(*async_coros)
-        for name, result in zip(async_names, results):
-            resolved[name] = result
+        # Run all AwaitPromptDepends concurrently (ADR 0001 P9, ADR 0008).
+        # asyncio.wait with FIRST_EXCEPTION is used instead of asyncio.gather so
+        # that sibling tasks are explicitly cancelled when one raises — fulfilling
+        # the "first exception cancels the rest" contract. asyncio.gather leaves
+        # siblings running as orphaned tasks on the event loop.
+        tasks = [asyncio.ensure_future(c) for c in async_coros]
+        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        # Propagate via .result() which re-raises with original __traceback__ intact.
+        for name, task in zip(async_names, tasks):
+            resolved[name] = task.result()
 
     return resolved
 

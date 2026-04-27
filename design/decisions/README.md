@@ -11,7 +11,7 @@ supersedes the old one and update the old one's `Superseded by` field.
 - [0008 — Async resolver cancellation and error propagation](0008-async-resolver-cancellation-and-error-propagation.md)
   — Replaces `asyncio.gather` with `asyncio.wait + explicit cancel` to fulfil ADR 0001 P9
   ("first exception cancels the rest"); confirms stacktrace and re-raise behaviour
-  correct across all other error paths. Proposed 2026-04-27.
+  correct across all other error paths. Accepted 2026-04-27.
 - [0007 — Integrations and Annotated DI syntax](0007-integrations-and-annotated-di-syntax.md)
   — `Annotated[T, PromptDepends(...)]` as primary DI syntax (default-value form
   silently deprecated); `promptstrings[dishka]` via `DishkaPromptContext.resolve()`;

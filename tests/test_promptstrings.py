@@ -1437,3 +1437,67 @@ def test_return_annotation_name_error_does_not_raise_at_decoration() -> None:
     # Must not raise — return annotation NameError is tolerated.
     decorated = mod.__dict__["promptstring"](mod.__dict__["prompt"])
     assert decorated is not None
+
+
+# ---------------------------------------------------------------------------
+# ADR 0008 — async resolver cancellation (asyncio.wait + cancel)
+# ---------------------------------------------------------------------------
+
+# Module-level resolvers: required because test functions define them locally,
+# but under `from __future__ import annotations` (PEP 563) all annotations become
+# strings, and get_type_hints cannot resolve names that are not in fn.__globals__.
+
+_adr008_log: dict[str, list[str]] = {"cancelled": [], "completed": []}
+
+
+async def _adr008_fast_fail(ctx: PromptContext) -> str:
+    raise ValueError("resolver failed")
+
+
+async def _adr008_slow_sibling(ctx: PromptContext) -> str:
+    try:
+        await asyncio.sleep(10)
+        _adr008_log["completed"].append("slow")
+        return "slow"
+    except asyncio.CancelledError:
+        _adr008_log["cancelled"].append("slow")
+        raise
+
+
+async def _adr008_bad_resolver(ctx: PromptContext) -> str:
+    raise RuntimeError("original message")
+
+
+async def test_failing_async_resolver_cancels_siblings() -> None:
+    """ADR 0008: first AwaitPromptDepends exception cancels sibling resolvers.
+
+    asyncio.gather leaves siblings running as orphaned tasks; asyncio.wait
+    with explicit cancel delivers CancelledError to siblings before propagating
+    the original exception.
+    """
+    _adr008_log["cancelled"].clear()
+    _adr008_log["completed"].clear()
+
+    @promptstring(strict=False)
+    def prompt(
+        a: Annotated[str, AwaitPromptDepends(_adr008_fast_fail)],
+        b: Annotated[str, AwaitPromptDepends(_adr008_slow_sibling)],
+    ) -> None:
+        """Result: {a} {b}"""
+
+    with pytest.raises(ValueError, match="resolver failed"):
+        await prompt.render(PromptContext())
+
+    assert _adr008_log["cancelled"] == ["slow"], "sibling must be cancelled, not left running"
+    assert _adr008_log["completed"] == [], "sibling must not complete after failure"
+
+
+async def test_failing_async_resolver_propagates_original_exception_type() -> None:
+    """ADR 0008: original exception type and message are preserved after wait+cancel."""
+
+    @promptstring(strict=False)
+    def prompt(x: Annotated[str, AwaitPromptDepends(_adr008_bad_resolver)]) -> None:
+        """Value: {x}"""
+
+    with pytest.raises(RuntimeError, match="original message"):
+        await prompt.render(PromptContext())
