@@ -24,6 +24,12 @@ graveyard of "decided but never archived" docs.
 
 <!-- Keep this list small. If it grows past ~5, something is stalling. -->
 
+- [Examples infrastructure](examples-infrastructure.md)
+  — `examples/` layout, FakeLLMClient, `examples` extra, CI job, and
+  per-file catalogue.
+  **Accepted 2026-04-27 → promoted to
+  [ADR 0010](../decisions/0010-examples-infrastructure.md).**
+  Preserved as exploratory context.
 - [API and DX baseline for 1.0](api-1.0-baseline.md) — promises,
   non-promises, lifecycle map, and DX rubric for the 1.0 contract.
   **Accepted 2026-04-26 → promoted to

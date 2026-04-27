@@ -8,6 +8,10 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0010 — Examples infrastructure](0010-examples-infrastructure.md)
+  — `examples/` directory with 10 numbered self-contained scripts, `FakeLLMClient` mock,
+  `examples` optional-dependency group, and a dedicated CI job. Target version 1.3.0.
+  Accepted 2026-04-27.
 - [0009 — `response_schema` property for structured output](0009-response-schema-property.md)
   — Adds `response_schema: Any` to `_PromptString`, `_PromptStringGenerator`, and the
   `Promptstring` Protocol; exposes the function's return annotation (excluding
