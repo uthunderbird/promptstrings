@@ -612,7 +612,7 @@ def _has_dynamic_return_annotation(fn: Callable[..., Any]) -> bool:
     except AttributeError:
         return False
     return_hint = hints.get("return")
-    if return_hint is None:
+    if return_hint is None or return_hint is ... or return_hint == "...":
         return False
     return (
         return_hint is PromptSource
@@ -798,13 +798,13 @@ class _PromptString:
         with a freshly parsed Template).
         """
         source_candidate = await _maybe_await(self._fn(**resolved))
-        # Guard: docstring functions must return None (ADR 0006 D2).
-        if self._compiled is not None and source_candidate is not None:
+        # Guard: docstring functions must return None or ... (ADR 0006 D2).
+        if self._compiled is not None and source_candidate is not None and source_candidate is not ...:
             raise PromptRenderError(
-                f"Docstring-based promptstring {self.__name__!r} returned a non-None value "
+                f"Docstring-based promptstring {self.__name__!r} returned a non-None, non-Ellipsis value "
                 f"at render time. Annotate with -> Template or -> PromptSource for dynamic sources."
             )
-        if source_candidate is None:
+        if source_candidate is None or source_candidate is ...:
             # Docstring path — use the eagerly compiled static Template.
             return self._compiled or PromptSource(content=""), True
         if isinstance(source_candidate, Template):
@@ -815,7 +815,7 @@ class _PromptString:
         if isinstance(source_candidate, PromptSource):
             return source_candidate, False
         raise PromptRenderError(
-            "Promptstring source selector must return None, str, Template, or PromptSource, "
+            "Promptstring source selector must return None, ..., str, Template, or PromptSource, "
             f"got {type(source_candidate)!r}"
         )
 

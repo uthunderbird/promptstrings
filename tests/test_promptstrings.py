@@ -1349,3 +1349,45 @@ def test_from_without_dishka_context_raises_key_error() -> None:
 
     with pytest.raises(KeyError):
         asyncio.run(prompt.render(PromptContext()))
+
+
+# ---------------------------------------------------------------------------
+# Ellipsis return annotation — treated identically to None (-> ...)
+# ---------------------------------------------------------------------------
+
+
+def test_promptstring_ellipsis_annotation_uses_docstring() -> None:
+    """-> ... is treated as docstring-based, same as -> None."""
+
+    @promptstring
+    def prompt(name: str) -> ...:  # type: ignore[return]
+        """Hello, {name}!"""
+
+    result = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    assert result == "Hello, Ada!"
+
+
+def test_promptstring_ellipsis_return_value_uses_docstring() -> None:
+    """Returning ... at render time is equivalent to returning None (uses docstring)."""
+
+    @promptstring
+    def prompt(name: str) -> None:
+        """Hello, {name}!"""
+        return ...  # type: ignore[return-value]
+
+    result = asyncio.run(prompt.render(PromptContext({"name": "Ada"})))
+    assert result == "Hello, Ada!"
+
+
+def test_promptstring_ellipsis_and_none_annotation_both_allow_placeholders() -> None:
+    """Both -> None and -> ... compile the docstring and expose placeholders."""
+
+    @promptstring
+    def p_none(name: str) -> None:
+        """Hello, {name}!"""
+
+    @promptstring
+    def p_ellipsis(name: str) -> ...:  # type: ignore[return]
+        """Hello, {name}!"""
+
+    assert p_none.placeholders == p_ellipsis.placeholders == frozenset({"name"})
