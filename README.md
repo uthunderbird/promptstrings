@@ -28,6 +28,9 @@ pip install promptstrings
 
 Requires Python 3.14+.
 
+See runnable examples in [`examples/`](examples/) — one file per concept,
+runnable with `python examples/01_basic_render.py`.
+
 ## Quickstart
 
 ```python
@@ -67,6 +70,10 @@ Pass `strict=False` to opt out.
 
 ## Dependency injection
 
+Use `PromptDepends` when a parameter needs to be resolved from application
+state (authenticated user, loaded config, traced span) rather than passed
+directly by the caller.
+
 Declare resolver dependencies using `typing.Annotated`:
 
 ```python
@@ -89,6 +96,33 @@ def hello(
 
 Multiple `AwaitPromptDepends` resolvers run concurrently. If one raises, the rest are cancelled before the exception propagates — resolvers can use `try/finally` for cleanup.
 
+## Structured output
+
+When a prompt function is annotated with a user-defined return type, the
+`response_schema` property exposes that type — no need to repeat it at the
+call site. Works with any structured-output framework (instructor, litellm,
+OpenAI structured outputs).
+
+```python
+from pydantic import BaseModel
+from promptstrings import promptstring
+
+class Invoice(BaseModel):
+    vendor: str
+    amount: float
+
+@promptstring
+def extract(text: str) -> Invoice:
+    """Extract invoice data from: {text}"""
+
+messages = await extract.render_messages(ctx)
+# Single source of truth — Invoice is not repeated here:
+result = client.chat(response_model=extract.response_schema, messages=...)
+```
+
+`response_schema` is `None` for internal return types (`None`, `...`, `str`,
+`Template`, `PromptSource`) and when no return annotation is present.
+
 ## Integrations
 
 ### dishka
@@ -105,8 +139,8 @@ from promptstrings import promptstring, PromptContext
 from promptstrings.integrations.dishka import DishkaContext, From
 
 @promptstring
-def greet(user: Annotated[User, From(User)]) -> None:
-    """Hello, {user.name}!"""
+def greet(username: Annotated[str, From(User)]) -> None:
+    """Hello, {username}!"""
 
 ctx = DishkaContext(container=my_container)
 result = await greet.render(ctx)
@@ -252,8 +286,14 @@ for logging, metrics, and tracing.
 from promptstrings import Promptstrings, Observer, RenderStartEvent, RenderEndEvent, RenderErrorEvent
 
 class LogObserver:
-    def on_event(self, event: RenderStartEvent | RenderEndEvent | RenderErrorEvent) -> None:
-        print(f"[{type(event).__name__}] {event.prompt_name}")
+    def on_render_start(self, event: RenderStartEvent) -> None:
+        print(f"[start] {event.prompt_name}")
+
+    def on_render_end(self, event: RenderEndEvent) -> None:
+        print(f"[end] {event.prompt_name} ({event.elapsed_ns // 1_000_000}ms)")
+
+    def on_render_error(self, event: RenderErrorEvent) -> None:
+        print(f"[error] {event.prompt_name}: {event.error}")
 
 ps = Promptstrings(observer=LogObserver())
 
@@ -273,29 +313,11 @@ Stable. The library follows SemVer from 1.0 — breaking changes require a major
 version bump. The full API contract is documented in
 [`design/decisions/0001`](design/decisions/0001-api-and-dx-baseline-for-1.0.md).
 
-## Design and architecture
+## Design
 
-The functional vision and 1.0 contract are documented under
-[`design/`](design/). Start here:
-
-- **[`design/VISION.md`](design/VISION.md)** — single source of truth for
-  *why* the library exists: the problems it solves and how its developer
-  experience answers them. Updated in place, versioned via
-  `vision_version`.
-- **[`design/decisions/0001-api-and-dx-baseline-for-1.0.md`](design/decisions/0001-api-and-dx-baseline-for-1.0.md)**
-  — the locked SemVer contract (13 promises, 12 non-promises,
-  lifecycle map, DX rubric R1–R10). **The canonical contract.**
-- **[`design/decisions/0002-integration-seams-for-1.0.md`](design/decisions/0002-integration-seams-for-1.0.md)**
-  — extension surface for 1.0: `Promptstrings` configuration carrier,
-  `Observer` Protocol, `PromptContext.extras`, and per-vendor adapter
-  model. **The canonical contract for integration.**
-- *(historical proposals preserved for the red-team trace and
-  rationale: [`design/proposals/api-1.0-baseline.md`](design/proposals/api-1.0-baseline.md),
-  [`design/proposals/api-1.0-integrations.md`](design/proposals/api-1.0-integrations.md))*
-- **[`design/glossary.md`](design/glossary.md)** — canonical
-  vocabulary used across all design docs.
-- **[`design/README.md`](design/README.md)** — directory map and
-  conventions for adding decisions, proposals, and DX deep-dives.
+The API contract (stability guarantees, 13 promises, DX rubric) is documented
+in [`design/decisions/0001`](design/decisions/0001-api-and-dx-baseline-for-1.0.md).
+Full design documentation lives in [`design/`](design/).
 
 ## License
 
