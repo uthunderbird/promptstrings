@@ -1582,3 +1582,96 @@ def test_response_schema_available_on_generator() -> None:
         yield f"Summarise {topic}."
 
     assert gen.response_schema is _SummaryModel
+
+
+# ---------------------------------------------------------------------------
+# ADR 0011 — Template composition safety
+# ---------------------------------------------------------------------------
+
+
+def test_composition_docstring_outer_renders_correctly() -> None:
+    """render() result passed as parameter to another promptstring works (ADR 0011 D1)."""
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(system: str, question: str) -> None:
+        """System: {system}\nQuestion: {question}"""
+
+    async def run() -> str:
+        inner_text = await inner.render(PromptContext({"topic": "Python"}))
+        return await outer.render(PromptContext({"system": inner_text, "question": "What is asyncio?"}))
+
+    result = asyncio.run(run())
+    assert result == "System: Expert on Python.\nQuestion: What is asyncio?"
+
+
+def test_composition_no_second_parse_injection() -> None:
+    """Parameter value containing {placeholder} syntax is never re-parsed (ADR 0011 D1)."""
+
+    @promptstring(strict=False)
+    def outer(content: str, secret: str) -> None:
+        """Answer: {content}"""
+
+    async def run() -> str:
+        return await outer.render(PromptContext({"content": "Use {secret} here", "secret": "TOP_SECRET"}))
+
+    result = asyncio.run(run())
+    assert result == "Answer: Use {secret} here"
+    assert "TOP_SECRET" not in result
+
+
+def test_composition_promptstring_object_as_param_raises_docstring_outer() -> None:
+    """Passing a Promptstring object instead of render() result raises PromptRenderError (ADR 0011 D3)."""
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    with pytest.raises(PromptRenderError, match="did you forget"):
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+
+def test_composition_promptstring_object_as_param_raises_tstring_outer() -> None:
+    """Guard fires in _render_dynamic (t-string outer) too (ADR 0011 D3)."""
+    from string.templatelib import Template
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(system: str) -> Template:
+        return t"System: {system}"
+
+    with pytest.raises(PromptRenderError, match="did you forget"):
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+
+def test_composition_di_in_both_prompts() -> None:
+    """PromptDepends in both inner and outer resolves correctly (ADR 0011 D2)."""
+
+    @promptstring
+    def inner(topic: Annotated[str, PromptDepends(lambda ctx: ctx.require("topic"))]) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(
+        system: str,
+        question: Annotated[str, PromptDepends(lambda ctx: ctx.require("question"))],
+    ) -> None:
+        """System: {system}\nQuestion: {question}"""
+
+    async def run() -> str:
+        ctx = PromptContext({"topic": "Python", "question": "What is asyncio?"})
+        inner_text = await inner.render(ctx)
+        return await outer.render(PromptContext({"system": inner_text, "question": ctx.require("question")}))
+
+    result = asyncio.run(run())
+    assert result == "System: Expert on Python.\nQuestion: What is asyncio?"

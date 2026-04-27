@@ -637,12 +637,19 @@ def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
             parts.append(item)
         else:
             try:
-                parts.append(str(resolved[item.expression]))
+                value = resolved[item.expression]
             except KeyError:
                 raise PromptRenderError(
                     f"Template expression {item.expression!r} has no matching resolved parameter",
                     missing_key=item.expression,
                 )
+            if isinstance(value, Promptstring):
+                raise PromptRenderError(
+                    f"Parameter {item.expression!r} is a Promptstring object — "
+                    f"did you forget `await {item.expression}.render(ctx)`?",
+                    missing_key=item.expression,
+                )
+            parts.append(str(value))
     return "".join(parts)
 
 
@@ -672,10 +679,19 @@ def parse_trusted_template(source: str, *, prompt_name: str = "<unknown>") -> Te
 
 def _render_dynamic(tpl: Template) -> str:
     """Render a t-string-derived Template using already-resolved Interpolation values."""
-    return "".join(
-        item if isinstance(item, str) else str(item.value)
-        for item in tpl
-    )
+    parts: list[str] = []
+    for item in tpl:
+        if isinstance(item, str):
+            parts.append(item)
+        else:
+            if isinstance(item.value, Promptstring):
+                raise PromptRenderError(
+                    "A t-string interpolation evaluated to a Promptstring object — "
+                    "did you forget `await prompt.render(ctx)`?",
+                    missing_key=None,
+                )
+            parts.append(str(item.value))
+    return "".join(parts)
 
 
 def _has_dynamic_return_annotation(fn: Callable[..., Any]) -> bool:
