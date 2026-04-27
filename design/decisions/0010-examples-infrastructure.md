@@ -68,6 +68,7 @@ and `examples/utils/`).
 | `08_dishka_integration.py` | `DishkaContext` + `From()` for container-resolved dependencies |
 | `09_observer.py` | `Promptstrings` config + `Observer` for render-event tracing |
 | `10_response_schema.py` | `response_schema` as single source of truth across multiple prompt functions |
+| `11_fastapi_endpoint.py` | `promptstring` inside a FastAPI request handler; `PromptContext` from request body; `response_schema` passed to LLM client via `Depends` |
 
 ### FakeLLMClient
 
@@ -88,6 +89,8 @@ single comment in each such file names the real client to substitute.
 examples = [
     "pydantic>=2.0,<3.0",
     "dishka>=1.0",
+    "fastapi>=0.100",
+    "httpx>=0.24",
 ]
 ```
 
@@ -160,7 +163,7 @@ examples:
 - **Positive:** Every integration scenario (dishka, pydantic, observer,
   response_schema) has a verified end-to-end path.
 - **Positive:** CI catches example rot on every push to main.
-- **Negative:** Ten new files to maintain; each API change that affects
+- **Negative:** Eleven new files to maintain; each API change that affects
   the public surface may require updating one or more examples.
 - **Neutral:** CI build time increases by one job (expected: <30 s).
 - **Neutral:** `examples` extra must be kept in sync with the integration

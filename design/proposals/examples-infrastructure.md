@@ -48,6 +48,7 @@ examples/
   08_dishka_integration.py
   09_observer.py
   10_response_schema.py
+  11_fastapi_endpoint.py
 ```
 
 Files are numbered to communicate recommended reading order, not to imply
@@ -67,6 +68,7 @@ execution dependency. Each file is self-contained.
 | `08_dishka_integration.py` | `DishkaContext` + `From()` for container-resolved deps |
 | `09_observer.py` | `Promptstrings` config + `Observer` for render-event tracing |
 | `10_response_schema.py` | `response_schema` as single source of truth across multiple prompt functions |
+| `11_fastapi_endpoint.py` | `promptstring` inside a FastAPI request handler; `PromptContext` from request body; `response_schema` passed to LLM client via `Depends` |
 
 ## FakeLLMClient contract
 
@@ -91,6 +93,8 @@ A new `examples` optional-dependency group in `pyproject.toml`:
 examples = [
     "pydantic>=2.0,<3.0",
     "dishka>=1.0",
+    "fastapi>=0.100",
+    "httpx>=0.24",
 ]
 ```
 
