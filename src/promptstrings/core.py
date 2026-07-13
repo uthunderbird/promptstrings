@@ -629,6 +629,18 @@ def _placeholders_from_template(tpl: Template) -> frozenset[str]:
     return frozenset(i.expression for i in tpl.interpolations)
 
 
+def _is_unrendered_prompt(value: Any) -> bool:
+    """Return True if value is one of this library's own prompt objects (ADR 0011 D3).
+
+    Deliberately narrowed to the concrete internal classes rather than the
+    ``Promptstring`` Protocol: the Protocol is the documented extension surface
+    (ADR 0001 Promise 2), so a third-party implementation may define a
+    meaningful ``__str__`` and legitimately substitute as a string. Only our own
+    objects are known to have no valid rendered form.
+    """
+    return isinstance(value, (_PromptString, _PromptStringGenerator))
+
+
 def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
     """Render a docstring-derived Template using expression→resolved lookup."""
     parts: list[str] = []
@@ -643,11 +655,11 @@ def _render_static(tpl: Template, resolved: dict[str, Any]) -> str:
                     f"Template expression {item.expression!r} has no matching resolved parameter",
                     missing_key=item.expression,
                 )
-            if isinstance(value, Promptstring):
+            if _is_unrendered_prompt(value):
                 raise PromptRenderError(
-                    f"Parameter {item.expression!r} is a Promptstring object — "
+                    f"Parameter {item.expression!r} is an unrendered promptstring — "
                     f"did you forget `await {item.expression}.render(ctx)`?",
-                    missing_key=item.expression,
+                    missing_key=None,
                 )
             parts.append(str(value))
     return "".join(parts)
@@ -684,9 +696,9 @@ def _render_dynamic(tpl: Template) -> str:
         if isinstance(item, str):
             parts.append(item)
         else:
-            if isinstance(item.value, Promptstring):
+            if _is_unrendered_prompt(item.value):
                 raise PromptRenderError(
-                    "A t-string interpolation evaluated to a Promptstring object — "
+                    "A t-string interpolation evaluated to an unrendered promptstring — "
                     "did you forget `await prompt.render(ctx)`?",
                     missing_key=None,
                 )

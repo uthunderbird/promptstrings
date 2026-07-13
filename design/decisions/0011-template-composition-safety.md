@@ -76,13 +76,27 @@ not catch this because the parameter name is present in the template and in
 `resolved`.
 
 Add an explicit guard in both render functions: before calling `str(value)`,
-check whether `value` is an instance of the `Promptstring` Protocol and raise
-`PromptRenderError` with an actionable message:
+check whether `value` is one of this library's own concrete prompt objects
+(`_PromptString` / `_PromptStringGenerator`) and raise `PromptRenderError` with
+an actionable message:
 
 ```
-PromptRenderError: Parameter 'system' is a Promptstring object — did you
+PromptRenderError: Parameter 'system' is an unrendered promptstring — did you
 forget `await prompt.render(ctx)`?
 ```
+
+The check is deliberately **nominal, not structural**: it does *not* test against
+the `Promptstring` Protocol. The Protocol is the documented long-term extension
+surface (ADR 0001 Promise 2), and user code is told to type against it. A
+third-party implementation may define a meaningful `__str__` — returning template
+source, a cached rendering, or an identifier — and substituting it into a
+template is legitimate. Only our own objects are known to have no valid rendered
+form, so only they are guarded. Testing the Protocol would break a documented
+extension point and would make this a breaking change requiring a major version.
+
+`missing_key` is `None` on both raise sites. The parameter *was* resolved, so
+this is not a missing-key path, and ADR 0003 defines `missing_key` as the
+parameter that could not be resolved.
 
 This check fires regardless of strict mode. It is the only render-time
 isinstance check on parameter values; no other type coercions are added.
@@ -103,6 +117,14 @@ Add `examples/12_template_composition.py` demonstrating:
 - **Warn instead of raise in D3** — rejected. A warning that produces a
   malformed prompt silently is worse than a hard failure. The developer's intent
   was clearly to get a rendered string; the right signal is an error.
+
+- **Guard on the `Promptstring` Protocol rather than the concrete classes** —
+  rejected. `Promptstring` is `@runtime_checkable`, so a structural check would
+  also fire on third-party implementations of the documented extension surface
+  (ADR 0001 Promise 2), which may have a meaningful `__str__`. That would remove
+  a capability the contract invites users to build on, making the change
+  breaking under SemVer and forcing a major version. The nominal check keeps the
+  blast radius at zero: only objects with no valid rendered form are refused.
 
 - **Scope `PromptContext` per render call (D2)** — rejected for 1.x. Scoping
   would require a breaking change to `PromptContext` semantics (currently a

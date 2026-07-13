@@ -20,17 +20,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key naming when inner and outer prompts share a `PromptContext`.
 
 ### Changed
-- Passing a `Promptstring` object as a parameter value now raises `PromptRenderError` with an
-  actionable message instead of silently rendering `<_PromptString object at 0x...>` into the
-  prompt (ADR 0011, D3). This fires on both render paths and regardless of strict mode.
-  `str(prompt_object)` itself is unaffected — serialising a prompt object for debugging still
-  works. Code that previously relied on a `Promptstring` repr reaching the rendered output was
-  producing a malformed prompt; that case now fails loudly.
+- Passing an unrendered promptstring (a `@promptstring` / `@promptstring_generator` object — i.e.
+  a forgotten `await prompt.render(ctx)`) as a parameter value now raises `PromptRenderError`
+  with an actionable message instead of silently rendering
+  `<promptstrings.core._PromptString object at 0x...>` into the prompt (ADR 0011, D3). Fires on
+  both render paths — `{name}` substitution and t-string interpolation — and regardless of strict
+  mode.
+  - The check is nominal, not structural: it does **not** test the `Promptstring` Protocol.
+    Third-party implementations of that Protocol (the documented extension surface, ADR 0001
+    Promise 2) still substitute via their own `__str__`.
+  - `str(prompt_object)` is unaffected; serialising a prompt object for debugging still works.
+  - `missing_key` is `None` on both raise sites: the parameter *was* resolved, so this is not a
+    missing-key path (ADR 0003 field schema).
 
 ## [1.2.0] - 2026-04-27
 
 ### Added
 - `response_schema` property for structured output (ADR 0009).
+
+### Changed
+- PEP-563 string return annotations are now resolved for dynamic-source detection and for
+  `response_schema`: `_has_dynamic_return_annotation` evaluates string annotations against the
+  function's globals, so an aliased or `from __future__ import annotations` style
+  `-> PromptSource` / `-> Template` is recognised where it previously was not. Unresolvable
+  return annotations fall back to the raw string instead of being dropped.
 
 ## [1.1.0] - 2026-04-27
 
@@ -56,6 +69,19 @@ project follows SemVer: breaking changes require a major version bump.
 
 ### Added
 - Trusted-publisher release workflow.
+- t-string template grammar on Python 3.14 (ADR 0005): the internal `_CompiledTemplate` is
+  replaced by `string.templatelib.Template`. A `@promptstring` function may return a t-string
+  (`t"..."`) annotated `-> Template`; `@promptstring_generator` may yield one. Generator
+  strict-mode checking is structural as a result.
+- `parse_trusted_template` for externally loaded template strings (ADR 0006), renamed from its
+  pre-1.0 name to make the security contract explicit: only pass strings whose content you
+  control, since `{param_name}` syntax in user-supplied input would be substituted.
+- Injection-safety guarantees (ADR 0006): substituted values are never re-parsed as templates on
+  any render path. The t-string path evaluates all expressions before the function returns.
+- `PromptDepends` parameters are exempt from the strict unused-parameter check; error messages
+  reworked for actionability.
+- Integration seams (ADR 0002): the `Promptstrings` configuration carrier and the `Observer`
+  hook.
 - Generator strict-mode WARNING log via `promptstrings.strict_heuristic` logger (ADR 0004,
   non-contract implementation recommendation): emits WARNING at `logging.WARNING` level when
   a resolved parameter has `str(value) == ""` (guaranteed false negative) or

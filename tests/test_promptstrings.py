@@ -6,6 +6,7 @@ Covers ADR 0001–0004 promises and DX rubric R1–R16.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from string.templatelib import Template as _Template
 from typing import Annotated
 
@@ -1652,6 +1653,56 @@ def test_composition_promptstring_object_as_param_raises_tstring_outer() -> None
 
     with pytest.raises(PromptRenderError, match="did you forget"):
         asyncio.run(outer.render(PromptContext({"system": inner})))
+
+
+def test_composition_guard_sets_missing_key_none() -> None:
+    """The D3 guard is not a missing-key path: missing_key stays None (ADR 0003 field schema)."""
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    with pytest.raises(PromptRenderError) as exc_info:
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+    assert exc_info.value.missing_key is None
+
+
+def test_composition_guard_ignores_third_party_protocol_impl() -> None:
+    """A third-party Promptstring implementation with a real __str__ still substitutes.
+
+    The Protocol is the documented extension surface (ADR 0001 Promise 2); the D3
+    guard targets this library's own unrendered prompt objects only.
+    """
+
+    class ThirdPartyPrompt:
+        placeholders = frozenset()
+        declared_parameters: dict[str, inspect.Parameter] = {}
+        response_schema = None
+
+        async def render(self, context: PromptContext | None = None) -> str:
+            return "rendered"
+
+        async def render_messages(
+            self, context: PromptContext | None = None
+        ) -> list[PromptMessage]:
+            return [PromptMessage(role="user", content="rendered")]
+
+        def __str__(self) -> str:
+            return "third-party"
+
+    assert isinstance(ThirdPartyPrompt(), Promptstring)
+
+    @promptstring(strict=False)
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    result = asyncio.run(outer.render(PromptContext({"system": ThirdPartyPrompt()})))
+    assert result == "System: third-party"
 
 
 def test_composition_di_in_both_prompts() -> None:
