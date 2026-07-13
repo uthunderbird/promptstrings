@@ -322,3 +322,9 @@ Full design documentation lives in [`design/`](design/).
 ## License
 
 MIT.
+
+## Who builds this
+
+Built by Daniyar Supiyev. I consult on AI agent systems — building them, and
+fixing the ones that misbehave in production — at
+[Forbidden Fundamentals](https://forbiddenfundamentals.kz).

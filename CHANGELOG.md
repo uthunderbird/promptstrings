@@ -5,9 +5,57 @@ All notable changes to `promptstrings` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-07-13
 
 ### Added
+- Template composition is a supported first-class pattern (ADR 0011). Passing the result of
+  `await inner.render(ctx)` as a parameter value to an outer prompt is safe: substituted values
+  are never re-parsed as templates, on every render path combination (docstring × t-string ×
+  `parse_trusted_template`). A user-controlled value containing `{identifier}` syntax passes
+  through literally.
+- Examples infrastructure (ADR 0010): runnable, dependency-light examples under `examples/`,
+  one file per concept, plus an `examples` extra (`pip install promptstrings[examples]`).
+- `examples/11_fastapi_endpoint.py` — DI-backed prompt rendering inside a FastAPI endpoint.
+- `examples/12_template_composition.py` — direct and DI composition patterns, with a note on
+  key naming when inner and outer prompts share a `PromptContext`.
+
+### Changed
+- Passing a `Promptstring` object as a parameter value now raises `PromptRenderError` with an
+  actionable message instead of silently rendering `<_PromptString object at 0x...>` into the
+  prompt (ADR 0011, D3). This fires on both render paths and regardless of strict mode.
+  `str(prompt_object)` itself is unaffected — serialising a prompt object for debugging still
+  works. Code that previously relied on a `Promptstring` repr reaching the rendered output was
+  producing a malformed prompt; that case now fails loudly.
+
+## [1.2.0] - 2026-04-27
+
+### Added
+- `response_schema` property for structured output (ADR 0009).
+
+## [1.1.0] - 2026-04-27
+
+### Added
+- `Annotated` DI syntax and the `integrations` package (ADR 0007): `PromptDepends` /
+  `AwaitPromptDepends` can be declared as `Annotated[T, PromptDepends(...)]`, with
+  first-class Dishka (`DishkaContext` + `From()`) and Pydantic v2 support.
+- `-> ...` (Ellipsis) return annotation is treated as equivalent to `-> None`.
+- Differentiated fail-fast for `get_type_hints` `NameError`.
+
+### Changed
+- Async resolver concurrency now uses `asyncio.wait` + explicit cancellation instead of
+  `asyncio.gather` (ADR 0008), giving deterministic cancellation and error propagation when
+  one resolver fails.
+- CI: `actions/checkout@v5` and `setup-uv@v6` (Node.js 24).
+
+## [1.0.0] - 2026-04-27
+
+First stable release. The API contract — stability guarantees, the 13 promises, and the DX
+rubric — is documented in
+[`design/decisions/0001`](design/decisions/0001-api-and-dx-baseline-for-1.0.md). From 1.0 the
+project follows SemVer: breaking changes require a major version bump.
+
+### Added
+- Trusted-publisher release workflow.
 - Generator strict-mode WARNING log via `promptstrings.strict_heuristic` logger (ADR 0004,
   non-contract implementation recommendation): emits WARNING at `logging.WARNING` level when
   a resolved parameter has `str(value) == ""` (guaranteed false negative) or
