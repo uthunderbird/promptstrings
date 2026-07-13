@@ -1705,6 +1705,55 @@ def test_composition_guard_ignores_third_party_protocol_impl() -> None:
     assert result == "System: third-party"
 
 
+def test_composition_guard_fires_under_strict_mode() -> None:
+    """The D3 guard is independent of strict mode — it fires with strict=True too."""
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=True)
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    with pytest.raises(PromptRenderError, match="did you forget"):
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+
+def test_composition_guard_sets_missing_key_none_on_dynamic_path() -> None:
+    """missing_key is None on the t-string raise site too, not just the static one."""
+    from string.templatelib import Template
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring(strict=False)
+    def outer(system: str) -> Template:
+        return t"System: {system}"
+
+    with pytest.raises(PromptRenderError) as exc_info:
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+    assert exc_info.value.missing_key is None
+
+
+def test_composition_guard_catches_generator_prompt_object() -> None:
+    """A _PromptStringGenerator passed as a parameter value is guarded too."""
+
+    @promptstring_generator
+    def inner(topic: str):
+        yield Role("system")
+        yield f"Expert on {topic}."
+
+    @promptstring(strict=False)
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    with pytest.raises(PromptRenderError, match="did you forget"):
+        asyncio.run(outer.render(PromptContext({"system": inner})))
+
+
 def test_composition_di_in_both_prompts() -> None:
     """PromptDepends in both inner and outer resolves correctly (ADR 0011 D2)."""
 

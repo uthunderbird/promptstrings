@@ -24,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/11_fastapi_endpoint.py` — DI-backed prompt rendering inside a FastAPI endpoint.
 - `examples/12_template_composition.py` — direct and DI composition patterns, with a note on
   key naming when inner and outer prompts share a `PromptContext`.
-- CI: an `examples` job runs every `examples/[0-9]*.py` on each push, so the examples cannot rot.
+- CI: an `examples` job runs every `examples/[0-9]*.py`, so the examples cannot rot. `build` (and
+  therefore `publish`) now depends on it, so a broken example blocks a release.
+- CI: a top-level `permissions: contents: read`, so jobs no longer inherit the repository's
+  default token scope.
 - README: a "Structured output" section documenting `response_schema` (shipped in 1.2.0,
   previously undocumented).
 
