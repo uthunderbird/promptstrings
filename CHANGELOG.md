@@ -5,6 +5,12 @@ All notable changes to `promptstrings` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Note on 1.0.0–1.2.0.** Those three releases shipped without changelog entries. Their sections
+> below were reconstructed from git history in 1.3.0, using the commit ranges between the release
+> tags, and their dates are the tag dates. The CHANGELOG bundled inside the 1.0.0/1.1.0/1.2.0
+> artifacts on PyPI is the original, incomplete one — those artifacts are immutable and were not
+> republished.
+
 ## [1.3.0] - 2026-07-13
 
 ### Added
@@ -18,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/11_fastapi_endpoint.py` — DI-backed prompt rendering inside a FastAPI endpoint.
 - `examples/12_template_composition.py` — direct and DI composition patterns, with a note on
   key naming when inner and outer prompts share a `PromptContext`.
+- CI: an `examples` job runs every `examples/[0-9]*.py` on each push, so the examples cannot rot.
+- README: a "Structured output" section documenting `response_schema` (shipped in 1.2.0,
+  previously undocumented).
+
+### Fixed
+- README: the dishka example did not compile. It used `{user.name}` as a placeholder, which the
+  `{identifier}`-only grammar rejects with `PromptCompileError`. It now resolves the attribute in
+  the resolver and interpolates a plain `{username}`.
+- README: the observer example defined `on_event`, which is not part of the `Observer` protocol
+  (`on_render_start` / `on_render_end` / `on_render_error`). An observer copied from the README
+  silently never fired. Both examples had been wrong since 1.0.0.
 
 ### Changed
 - Passing an unrendered promptstring (a `@promptstring` / `@promptstring_generator` object — i.e.
