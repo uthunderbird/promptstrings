@@ -327,4 +327,4 @@ MIT.
 
 Built by Daniyar Supiyev. I consult on AI agent systems — building them, and
 fixing the ones that misbehave in production — at
-[Forbidden Fundamentals](https://forbiddenfundamentals.kz).
+[Forbidden Fundamentals](https://forbiddenfundamentals.com).
