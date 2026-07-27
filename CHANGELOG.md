@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > artifacts on PyPI is the original, incomplete one — those artifacts are immutable and were not
 > republished.
 
+## [Unreleased]
+
+### Changed
+- `core.py` is split into nine modules (ADR 0012): `errors`, `types`, `observability`,
+  `introspection`, `templates`, `resolution`, `prompts`, `generators`, `factory`. **No public
+  API change** — every name still imports from `promptstrings`, `promptstrings.__all__` is
+  unchanged, and `promptstrings.core` remains as a shim re-exporting all 43 pre-split names.
+  - Two caveats that are real but narrow. Re-export does not preserve monkeypatch targets:
+    `monkeypatch.setattr("promptstrings.core._render_static", ...)` no longer affects
+    rendering, because the library resolves that name in `promptstrings.templates`. And
+    pickles embed the defining module, so objects pickled after this change cannot be loaded
+    by 1.0.0–1.2.0.
+  - `promptstrings.core` no longer exposes the modules it happened to import
+    (`promptstrings.core.asyncio` and similar). That was incidental attribute leakage rather
+    than API.
+- A `@promptstring_generator` that yields a `PromptSource` now raises an error saying delegated
+  rendering is unsupported on that engine and what to do instead, rather than reporting an
+  unsupported yield type. The capability was never available; only the message changes.
+
+### Added
+- README section "Three kinds of prompt, three sets of guarantees" and
+  `examples/13_prompt_classes.py`, documenting that a docstring, a `-> Template` return, and a
+  `-> PromptSource` return carry different guarantees (ADR 0012 D2). Two consequences are
+  stated explicitly for the first time: strictness and provenance are mutually exclusive per
+  prompt, and `response_schema` is available only on the docstring path.
+- `tools/split_gate.py` and a captured pre-split baseline, so the split's acceptance gates are
+  re-runnable rather than a one-off claim.
+
 ## [1.3.0] - 2026-07-13
 
 ### Added

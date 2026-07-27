@@ -1,8 +1,8 @@
 # 0012 — Modular architecture and delegated rendering
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
-- **Target version:** 1.4.0 (module split), seams as noted per decision
+- **Target version:** 1.4.0 (module split, shipped 2026-07-27); `provenance_from_file` (D4) not yet implemented; D5 deferred
 - **Deciders:** Daniyar Supiyev
 - **Supersedes:** retires ADR 0002 non-promise N-5. Full table in "Revisions to ADR 0002"
 - **Superseded by:** —
@@ -39,7 +39,8 @@ ADR 0002 did not anticipate, and two (N-3, N-7) for their original ones.
 - The 1.0 contract is not sacred; a 2.0 with breaking changes is permitted if the
   design requires it.
 - Protocols are preferred over abstract base classes.
-- This pass produces design only. No code changes.
+- This pass produces design only. No code changes. (Superseded by the owner on
+  2026-07-27: the split was authorised and executed — see "Execution record".)
 
 ## Decision
 
@@ -713,7 +714,7 @@ one property and can fail on its own.
 | 4a | Tests pass | `make test` |
 | 4b | Types clean | `make typecheck` |
 | 4c | Lint clean | `make lint` |
-| 4d | All twelve examples run | the loop CI already uses |
+| 4d | Every example runs | the loop CI already uses over `examples/[0-9]*.py` |
 | 4e | A built wheel installs and imports in a clean virtualenv | `uv build`, then `uv venv` + `uv pip install <wheel>` + import check |
 | 5 | Import-surface equivalence: names reachable from `promptstrings` and `promptstrings.core` equal the baseline sets | committed script |
 | 6 | The split moves code, it does not edit logic | AST source-text comparison, with the three exceptions below |
@@ -815,7 +816,7 @@ is a backlog item — each has a stated trigger to revisit.
 ## Execution record (2026-07-27)
 
 Steps 0–4 are done. `core.py` is nine modules, largest 280 lines; all seven
-gates, `ruff`, `mypy strict`, the test suite, the twelve examples, and a
+gates, `ruff`, `mypy strict`, the test suite, every example, and a
 clean-virtualenv wheel install pass, and the module import graph is the DAG this
 ADR specifies. `tools/split_gate.py` and its captured baseline are committed, so
 the gates are re-runnable by anyone.

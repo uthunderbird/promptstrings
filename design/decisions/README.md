@@ -8,6 +8,13 @@ supersedes the old one and update the old one's `Superseded by` field.
 
 <!-- Add entries as ADRs are accepted. Keep newest at the top. -->
 
+- [0012 — Modular architecture and delegated rendering](0012-modular-architecture-and-delegated-rendering.md)
+  — Splits `core.py` into nine modules, breaking its one real dependency cycle
+  (the ADR 0011 D3 guard) with a private `_PromptObject` marker base. Names the
+  three prompt classes — owned-static, owned-dynamic, delegated — and their
+  differing guarantees. Rules on five requested integration seams: four need no
+  new Protocol or type. Retires ADR 0002 N-5; leaves Promise I-2 untouched.
+  Target version 1.4.0. Accepted 2026-07-27.
 - [0011 — Template composition safety](0011-template-composition-safety.md)
   — Guarantees no second-parse injection in all render path combinations;
   adds `Promptstring`-object guard in `_render_static` / `_render_dynamic`;

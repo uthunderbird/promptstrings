@@ -68,6 +68,54 @@ await example.render(PromptContext(values={"name": "Ada", "unused": 1}))
 
 Pass `strict=False` to opt out.
 
+## Three kinds of prompt, three sets of guarantees
+
+Which guarantees you get depends on where the prompt text comes from. The library
+recognises three shapes, selected by what the decorated function returns. They
+are not interchangeable, and the differences are structural rather than
+incidental.
+
+| | **Owned-static**<br>docstring | **Owned-dynamic**<br>`-> Template` | **Delegated**<br>`-> PromptSource` |
+|---|---|---|---|
+| Who renders it | the library | the library | **you** |
+| `placeholders` known at decoration | **yes** | no | no |
+| Strict mode (missing / unused) | yes, before render | **yes**, at render | **no** |
+| `response_schema` | **yes** | no | no |
+| Provenance | no | no | **yes** |
+| Works with `@promptstring_generator` | yes | yes | **no** |
+
+Read the table as a set of trades:
+
+- **Owned-static is the strongest** and should be the default. Placeholders are
+  known before any model call, so a missing or unused parameter is caught at the
+  cheapest possible moment.
+- **Owned-dynamic keeps strict mode.** If a template arrives from a database or a
+  prompt-management system, `parse_trusted_template` still gives you
+  missing-parameter and unused-parameter checking — you only lose
+  *decoration-time* introspection, because the text does not exist yet.
+- **Delegated gives rendering away entirely.** Return a `PromptSource` and any
+  engine works — Jinja2, Mustache, plain concatenation — with no library support
+  and no version coupling. The library never parses what you return, so strict
+  mode over placeholders is not merely unimplemented here, it is impossible. In
+  exchange this is the only path that carries provenance.
+
+Two consequences worth knowing before you pick:
+
+**You cannot have both strictness and provenance on one prompt.** The owned paths
+check placeholders and set no provenance; the delegated path carries provenance
+and checks nothing. Choose per prompt.
+
+**Structured output is owned-static only.** `response_schema` is derived from the
+return annotation, and `-> Template` / `-> PromptSource` are exactly the
+annotations that select the other two shapes. A Jinja2-rendered prompt cannot
+also declare a typed response schema on the same function.
+
+A fourth shape does not exist: a function with no docstring annotated `-> str`
+raises `PromptCompileError` at decoration rather than rendering anything.
+
+See [`examples/13_prompt_classes.py`](examples/13_prompt_classes.py) for all
+three side by side.
+
 ## Dependency injection
 
 Use `PromptDepends` when a parameter needs to be resolved from application
