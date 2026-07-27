@@ -1,0 +1,213 @@
+"""Acceptance gates for the ADR 0012 module split.
+
+Two modes:
+
+    python tools/split_gate.py capture   # step 0, run BEFORE the split
+    python tools/split_gate.py check     # step 4, run AFTER the split
+
+`capture` records the pre-split surface into tools/split_baseline.json:
+every top-level binding name in core.py, the package `__all__`, the names
+reachable from `promptstrings` and `promptstrings.core`, and each top-level
+definition's source text keyed by name.
+
+`check` verifies gates 1, 3, 5, 6 and 7 from ADR 0012 D9 against that
+baseline. Gates 2 and 4 are covered by importing at all and by `make`.
+
+Gate 6 allows exactly the three deltas ADR 0012 D8 requires for the cycle
+fix, and nothing else.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+PKG = ROOT / "src" / "promptstrings"
+BASELINE = pathlib.Path(__file__).resolve().parent / "split_baseline.json"
+
+# ADR 0012 D8: the only definitions the split is permitted to edit.
+PERMITTED_BODY_DELTAS = {
+    "_is_unrendered_prompt",  # body becomes isinstance(value, _PromptObject)
+    "_PromptString",  # gains _PromptObject as a base
+    "_PromptStringGenerator",  # gains _PromptObject as a base
+}
+
+
+def top_level_defs(path: pathlib.Path) -> dict[str, str]:
+    """Map every top-level binding in `path` to its source text."""
+    source = path.read_text()
+    tree = ast.parse(source)
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = ast.get_source_segment(source, node) or ""
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = ast.get_source_segment(source, node) or ""
+    return out
+
+
+def package_defs() -> dict[str, str]:
+    """Top-level definitions across every module in the package except the shim."""
+    out: dict[str, str] = {}
+    for py in sorted(PKG.glob("*.py")):
+        if py.name in {"__init__.py", "core.py"}:
+            continue
+        for name, src in top_level_defs(py).items():
+            out[name] = src
+    return out
+
+
+def reachable(module_name: str) -> list[str]:
+    import importlib
+
+    mod = importlib.import_module(module_name)
+    return sorted(n for n in dir(mod) if not n.startswith("__"))
+
+
+def module_import_graph() -> dict[str, set[str]]:
+    """Intra-package import edges, module -> modules it imports from."""
+    graph: dict[str, set[str]] = {}
+    for py in sorted(PKG.glob("*.py")):
+        if py.name in {"__init__.py", "core.py"}:
+            continue
+        edges: set[str] = set()
+        tree = ast.parse(py.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                edges.add(node.module)
+        graph[py.stem] = edges
+    return graph
+
+
+def find_cycle(graph: dict[str, set[str]]) -> list[str] | None:
+    """Return one cycle as a node list, or None if the graph is a DAG."""
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = dict.fromkeys(graph, WHITE)
+    stack: list[str] = []
+
+    def visit(node: str) -> list[str] | None:
+        colour[node] = GREY
+        stack.append(node)
+        for nxt in sorted(graph.get(node, ())):
+            if nxt not in colour:
+                continue
+            if colour[nxt] == GREY:
+                return stack[stack.index(nxt) :] + [nxt]
+            if colour[nxt] == WHITE:
+                found = visit(nxt)
+                if found:
+                    return found
+        colour[node] = BLACK
+        stack.pop()
+        return None
+
+    for node in sorted(graph):
+        if colour[node] == WHITE:
+            found = visit(node)
+            if found:
+                return found
+    return None
+
+
+def capture() -> None:
+    import promptstrings
+
+    data = {
+        "core_defs": top_level_defs(PKG / "core.py"),
+        "package_all": sorted(promptstrings.__all__),
+        "reachable_package": reachable("promptstrings"),
+        "reachable_core": reachable("promptstrings.core"),
+    }
+    BASELINE.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    print(f"captured {len(data['core_defs'])} definitions -> {BASELINE.name}")
+    print(f"  package __all__: {len(data['package_all'])} names")
+    print(f"  reachable from promptstrings: {len(data['reachable_package'])}")
+    print(f"  reachable from promptstrings.core: {len(data['reachable_core'])}")
+
+
+def check() -> int:
+    import importlib
+
+    import promptstrings
+    import promptstrings.core
+
+    base = json.loads(BASELINE.read_text())
+    failures: list[str] = []
+
+    def gate(number: str, ok: bool, detail: str) -> None:
+        print(f"[{'PASS' if ok else 'FAIL'}] gate {number}: {detail}")
+        if not ok:
+            failures.append(number)
+
+    # Gate 1 — public names and __all__ unchanged.
+    missing_public = [n for n in base["package_all"] if not hasattr(promptstrings, n)]
+    gate(
+        "1a",
+        not missing_public,
+        f"all {len(base['package_all'])} public names import from promptstrings"
+        + (f" — missing {missing_public}" if missing_public else ""),
+    )
+    gate(
+        "1b",
+        sorted(promptstrings.__all__) == base["package_all"],
+        "promptstrings.__all__ unchanged",
+    )
+
+    # Gate 3 — every pre-split core name still importable from the shim.
+    missing_shim = [n for n in base["core_defs"] if not hasattr(promptstrings.core, n)]
+    gate(
+        "3",
+        not missing_shim,
+        f"all {len(base['core_defs'])} pre-split names import from promptstrings.core"
+        + (f" — missing {missing_shim}" if missing_shim else ""),
+    )
+
+    # Gate 5 — import-surface equivalence.
+    lost_pkg = sorted(set(base["reachable_package"]) - set(reachable("promptstrings")))
+    gate("5a", not lost_pkg, "promptstrings surface preserved" + (f" — lost {lost_pkg}" if lost_pkg else ""))
+    lost_core = sorted(set(base["reachable_core"]) - set(reachable("promptstrings.core")))
+    gate("5b", not lost_core, "promptstrings.core surface preserved" + (f" — lost {lost_core}" if lost_core else ""))
+
+    # Gate 6 — definitions moved, not edited (except D8's three).
+    now = package_defs()
+    edited: list[str] = []
+    absent: list[str] = []
+    for name, src in base["core_defs"].items():
+        if name not in now:
+            absent.append(name)
+        elif now[name] != src and name not in PERMITTED_BODY_DELTAS:
+            edited.append(name)
+    gate("6a", not absent, "every definition has a home" + (f" — unplaced {absent}" if absent else ""))
+    gate(
+        "6b",
+        not edited,
+        "no definition edited beyond D8's three permitted deltas"
+        + (f" — edited {edited}" if edited else ""),
+    )
+
+    # Gate 7 — no cross-module import cycle.
+    cycle = find_cycle(module_import_graph())
+    gate("7", cycle is None, "module import graph is a DAG" + (f" — cycle {cycle}" if cycle else ""))
+
+    if failures:
+        print(f"\n{len(failures)} gate(s) failed: {', '.join(failures)}")
+        return 1
+    print("\nall gates passed")
+    return 0
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if mode == "capture":
+        capture()
+    elif mode == "check":
+        sys.exit(check())
+    else:
+        print(__doc__)
+        sys.exit(2)
