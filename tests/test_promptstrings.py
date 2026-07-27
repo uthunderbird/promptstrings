@@ -1795,6 +1795,33 @@ def test_nested_unrendered_prompt_in_dataclass_is_named() -> None:
     assert "<unrendered promptstring 'inner'>" in result
 
 
+def test_generator_yielding_prompt_source_says_delegation_is_unsupported() -> None:
+    """The generator engine cannot delegate, and says so rather than saying 'unsupported type'.
+
+    Delegated rendering (returning a PromptSource) exists only on @promptstring.
+    A user reaching for it in a generator should learn that from the message,
+    not from the absence of a feature (ADR 0012 D2).
+    """
+
+    @promptstring_generator
+    def gen(topic: str):
+        yield PromptSource(content=f"Expert on {topic}.")
+
+    with pytest.raises(PromptRenderError, match="Delegated rendering is not supported"):
+        asyncio.run(gen.render(PromptContext({"topic": "python"})))
+
+
+def test_generator_unsupported_yield_still_names_the_type() -> None:
+    """Yields that are simply the wrong type keep the original, type-naming message."""
+
+    @promptstring_generator
+    def gen(topic: str):
+        yield 42
+
+    with pytest.raises(PromptRenderError, match="Unsupported promptstring generator yield type"):
+        asyncio.run(gen.render(PromptContext({"topic": "python"})))
+
+
 def test_composition_guard_sets_missing_key_none_on_dynamic_path() -> None:
     """missing_key is None on the t-string raise site too, not just the static one."""
     from string.templatelib import Template

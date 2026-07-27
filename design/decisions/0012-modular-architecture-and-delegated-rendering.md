@@ -4,7 +4,7 @@
 - **Date:** 2026-07-27
 - **Target version:** 1.4.0 (module split), seams as noted per decision
 - **Deciders:** Daniyar Supiyev
-- **Supersedes:** retires ADR 0002 non-promise N-5; conditionally amends ADR 0002 Promise I-2 (held, see D5). Full table in "Revisions to ADR 0002"
+- **Supersedes:** retires ADR 0002 non-promise N-5. Full table in "Revisions to ADR 0002"
 - **Superseded by:** —
 - **Method:** Swarm Mode design session. Named experts: Armin Ronacher (Jinja2/Flask, evangelist/analogist), Hynek Schlawack (API minimalism, devil's advocate), Brett Cannon (packaging/SemVer, completer-finisher), Raymond Hettinger (Python idiom, reframer), Charity Majors (observability, implementer). Findings F4–F12 are tool-grounded; see "Grounding". Hardened by four independent cold adversarial reviews; see "Notes".
 
@@ -208,11 +208,27 @@ a real piece of work (a `PromptSource` yield type, provenance per message, and a
 decision about whether provenance is per-message or per-render) and is
 deliberately **not** decided here.
 
-`[HELD — owner decision]` Whether to extend delegation to generators before or
-after the split. The recommendation is after: it is a feature with its own design
-questions, while the split is a zero-behaviour-change refactor, and bundling them
-would make the refactor unverifiable by the "moves code, does not edit logic"
-gate in D9.
+**Decided 2026-07-27: not built, and not scheduled.** The owner delegated this
+call. Applying this ADR's own test — name the concrete code that will go through
+the seam — generator delegation fails it exactly as D5 does. There is no named
+consumer: the request that motivated this ADR was a single-message prompt, not a
+generator. Its strongest motivation was multi-message vendor prompts, and that
+rests on the trace linkage the owner has now deferred. Building it would mean
+settling a `PromptSource` yield type, whether provenance is per-message or
+per-render, and how strict mode interacts — three open questions in service of
+demand nobody has expressed.
+
+What *was* done instead is to make the absence legible rather than surprising. A
+generator that yields a `PromptSource` previously raised
+`"Unsupported promptstring generator yield type: <class '...PromptSource'>"`,
+which reads as a type error rather than a missing capability. It now says
+delegated rendering is unsupported on this engine, why (provenance has nowhere to
+attach), and what to do instead. That is one branch and two tests, and it costs
+nothing to reverse.
+
+**Trigger to revisit:** a named case that needs provenance or a vendor handle on a
+multi-message prompt. Until then this is a documented boundary, not a backlog
+item.
 
 ### D3 — No `Renderer` Protocol
 
@@ -382,22 +398,27 @@ because the new field is last and defaulted.
    earns its place only if the linkage should work *without* the call site knowing
    about it.
 
-`[HELD — owner decision]` D5 ships only if (2) is answered yes. Until then it is a
-recommendation with a validated shape, not a committed change. The recommendation
-is to **defer D5 to the adapter ADR** and build a real Langfuse adapter first: a
-field added for a linkage nobody has performed is exactly the lock-too-early
-mistake this ADR credits ADR 0002 for avoiding.
+**Decided 2026-07-27 by the owner: deferred.** D5 does not ship. The shape above
+is validated and recorded so that whoever builds the Langfuse adapter starts from
+it rather than rediscovering the `compare=False, repr=False, hash=False`
+requirement — but the field is added *by that work*, if the linkage turns out to
+need it, not before. A field added for a linkage nobody has performed is exactly
+the lock-too-early mistake this ADR credits ADR 0002 for avoiding.
+
+Consequently ADR 0002's Promise I-2 is **untouched**, and this ADR's net public
+surface change is `provenance_from_file` alone.
 
 ### D5a — Total new public surface
 
 | Item | Kind | Status |
 |---|---|---|
 | `provenance_from_file` | new function | proposed (D4) |
-| `PromptSource.handle` | new field on existing type | held (D5) |
-| `RenderEndEvent.handle` | new field on existing type, amends Promise I-2 | held (D5) |
+| `PromptSource.handle` | new field on existing type | **deferred** (D5) |
+| `RenderEndEvent.handle` | new field on existing type | **deferred** (D5) |
 
-If D5 is deferred as recommended, this ADR's entire net public surface change is
-**one helper function**. The split itself (D8–D9) adds nothing.
+D5 was deferred by the owner, so this ADR's entire net public surface change is
+**one helper function**. The split itself (D8–D9) adds nothing, and Promise I-2
+is not amended.
 
 ### D6 — OpenTelemetry needs no change; N-1 stands
 
@@ -787,9 +808,9 @@ violated here, by a change with its own justification.
 **Step 6 — document the owned/delegated distinction (D2)** in the README and as a
 new example, including the asymmetry table.
 
-**Not scheduled:** D5 (`handle`) is held pending the owner decision, and
-delegation for the generator engine is a feature with its own design questions.
-Neither belongs in the split.
+**Not scheduled:** D5 (`handle`) is deferred to the adapter work, and generator
+delegation is decided against for now. Neither belongs in the split, and neither
+is a backlog item — each has a stated trigger to revisit.
 
 ## Execution record (2026-07-27)
 
@@ -850,7 +871,7 @@ gate 6 for reasons unrelated to the refactor.
 | **N-7** no plugin registry | **Stands** | Nothing in this design needs named-backend lookup. |
 | **N-10** Observer not invoked from resolver tasks | **Stands** | Restricts callback location, not span nesting (D6). |
 | **N-5** no bundled Pydantic adapters | **Formally retired** | Already contradicted in practice: ADR 0007 D4 placed adapters in `src/promptstrings/integrations/` and anticipated `integrations/opentelemetry.py`. This ADR records the supersession that ADR 0007 made without stating. |
-| **Promise I-2** `RenderEndEvent` four-field shape | **Amended if and only if D5 ships** | D5 appends a defaulted, non-comparing `handle` field. This is a **promise-level** change, not a non-promise revision. It is held pending the D5 decision; if D5 is deferred as recommended, I-2 is untouched. |
+| **Promise I-2** `RenderEndEvent` four-field shape | **Untouched** | D5 would have appended a defaulted `handle` field, which is a promise-level change rather than a non-promise revision. D5 was deferred by the owner on 2026-07-27, so I-2 stands unmodified. |
 
 Two clarifications an earlier draft got wrong:
 
@@ -1040,9 +1061,9 @@ in this ADR and the right targets for further review:
 3. `introspection` and `templates` staying apart — an appeal to release history,
    with `_compile_at_decoration` sitting on the seam.
 
-Two decisions are **held for the owner** and the ADR is not complete without them:
-whether D5 ships at all or defers to an adapter ADR (D5), and whether delegation
-is extended to the generator engine before or after the split (D2).
+Both previously-held decisions are now resolved (2026-07-27): D5 is **deferred**
+by the owner, and generator delegation is **not built**, decided against this
+ADR's own named-consumer test. Neither leaves the record open.
 
 Companion ADRs: [`0001`](0001-api-and-dx-baseline-for-1.0.md) (the 1.0 contract),
 [`0002`](0002-integration-seams-for-1.0.md) (integration seams, partially revised

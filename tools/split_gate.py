@@ -14,7 +14,18 @@ definition's source text keyed by name.
 baseline. Gates 2 and 4 are covered by importing at all and by `make`.
 
 Gate 6 allows exactly the three deltas ADR 0012 D8 requires for the cycle
-fix, and nothing else.
+fix, applied as transformations of the pre-split text, and nothing else.
+
+**Gate 6 is a split-time gate; the others are not.** It answers one
+historical question — did the split move code without editing it — and it
+was answered at the split commit. Every legitimate change to a moved
+definition afterwards will fail it, correctly, because the baseline is a
+frozen snapshot of a file that no longer exists. To re-check the historical
+claim, run `check` against the split commit (e.g. in a worktree) rather than
+against the working tree.
+
+Gates 1, 3, 5 and 7 stay meaningful indefinitely: they assert that the
+public surface, the shim, and the layering still hold.
 """
 
 from __future__ import annotations
@@ -28,11 +39,23 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PKG = ROOT / "src" / "promptstrings"
 BASELINE = pathlib.Path(__file__).resolve().parent / "split_baseline.json"
 
-# ADR 0012 D8: the only definitions the split is permitted to edit.
-PERMITTED_BODY_DELTAS = {
-    "_is_unrendered_prompt",  # body becomes isinstance(value, _PromptObject)
-    "_PromptString",  # gains _PromptObject as a base
-    "_PromptStringGenerator",  # gains _PromptObject as a base
+# ADR 0012 D8: the three edits the split is permitted to make, as exact
+# transformations of the pre-split text rather than as an exemption list.
+#
+# Exempting a whole definition would make every later change to it invisible:
+# once `_PromptStringGenerator` is on a skip-list, an unrelated edit to its body
+# passes unnoticed. Applying the expected transformation and then demanding exact
+# equality keeps the gate able to fail.
+PERMITTED_DELTAS: dict[str, tuple[str, str]] = {
+    "_is_unrendered_prompt": (
+        "    return isinstance(value, (_PromptString, _PromptStringGenerator))",
+        "    return isinstance(value, _PromptObject)",
+    ),
+    "_PromptString": ("class _PromptString:", "class _PromptString(_PromptObject):"),
+    "_PromptStringGenerator": (
+        "class _PromptStringGenerator:",
+        "class _PromptStringGenerator(_PromptObject):",
+    ),
 }
 
 
@@ -208,14 +231,22 @@ def check() -> int:
         print(f"       note: {len(incidental)} incidental import attributes no longer "
               f"reachable via promptstrings.core ({', '.join(incidental[:4])}, …) — accepted")
 
-    # Gate 6 — definitions moved, not edited (except D8's three).
+    # Gate 6 — definitions moved, not edited (except D8's three exact deltas).
     now = package_defs()
     edited: list[str] = []
     absent: list[str] = []
     for name, src in base["core_defs"].items():
         if name not in now:
             absent.append(name)
-        elif now[name] != src and name not in PERMITTED_BODY_DELTAS:
+            continue
+        expected = src
+        if name in PERMITTED_DELTAS:
+            old, new = PERMITTED_DELTAS[name]
+            if old not in expected:
+                edited.append(f"{name} (permitted delta no longer applies)")
+                continue
+            expected = expected.replace(old, new, 1)
+        if now[name] != expected:
             edited.append(name)
     gate("6a", not absent, "every definition has a home" + (f" — unplaced {absent}" if absent else ""))
     gate(

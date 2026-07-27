@@ -25,6 +25,7 @@ from .types import (
     PromptContext,
     PromptDepends,
     PromptMessage,
+    PromptSource,
     Role,
     _PromptObject,
 )
@@ -112,6 +113,14 @@ class _PromptStringGenerator(_PromptObject):
                 template_yields.append(item)
                 buffer.append(_render_dynamic(item))
                 continue
+            if isinstance(item, PromptSource):
+                raise PromptRenderError(
+                    "Delegated rendering is not supported by @promptstring_generator: "
+                    "a PromptSource cannot be yielded, so provenance has nowhere to "
+                    "attach on this path. Yield the rendered str (or a PromptMessage) "
+                    "instead, or use @promptstring, which does accept a PromptSource "
+                    "return."
+                )
             raise PromptRenderError(
                 f"Unsupported promptstring generator yield type: {type(item)!r}"
             )
