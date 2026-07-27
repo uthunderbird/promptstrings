@@ -903,6 +903,16 @@ class _PromptString:
         )
         self.response_schema: Any = _response_schema_from_hints(self._hints)
 
+    def __repr__(self) -> str:
+        """Name this object instead of showing a default address repr (ADR 0011 D5).
+
+        The D3 guard raises when a prompt object is a parameter value, but it
+        cannot see one nested inside a container: containers format elements
+        with repr(). Self-describing here covers every container type and depth
+        without enumerating any. getattr guards against repr ever raising.
+        """
+        return f"<unrendered promptstring {getattr(self, '__name__', '?')!r}>"
+
     @property
     def placeholders(self) -> frozenset[str]:
         """Placeholder names from the compiled Template (ADR 0005).
@@ -1134,6 +1144,10 @@ class _PromptStringGenerator:
             )
         )
         self.response_schema: Any = _response_schema_from_hints(self._hints)
+
+    def __repr__(self) -> str:
+        """Name this object instead of showing a default address repr (ADR 0011 D5)."""
+        return f"<unrendered promptstring {getattr(self, '__name__', '?')!r}>"
 
     @property
     def placeholders(self) -> frozenset[str]:

@@ -20,7 +20,12 @@ from typing import Annotated
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from promptstrings import AwaitPromptDepends, PromptContext, promptstring
+from promptstrings import (
+    AwaitPromptDepends,
+    PromptContext,
+    PromptRenderError,
+    promptstring,
+)
 
 # --- Inner prompts -----------------------------------------------------------
 
@@ -110,6 +115,32 @@ async def injection_demo() -> None:
     assert "{variables}" in result  # braces are literal, not substituted
 
 
+# --- Forgetting to render: the two tiers -------------------------------------
+
+async def forgot_to_render_demo() -> None:
+    """A prompt object left where a rendered string belongs, at both tiers.
+
+    Tier 1 — passed as the parameter value: PromptRenderError (ADR 0011 D3).
+    Tier 2 — nested inside a structure: no error, but the object names itself
+    instead of printing an address (ADR 0011 D5). Containers format their
+    elements with repr(), which the guard cannot intercept, so nested cases are
+    named rather than rejected.
+    """
+    print("=== Forgetting to render ===")
+
+    # Tier 1: raises.
+    try:
+        await outer.render(PromptContext({"content": system_prompt}))
+    except PromptRenderError as exc:
+        print("top level  ->", exc)
+
+    # Tier 2: renders, but is diagnosable rather than opaque.
+    result = await outer.render(PromptContext({"content": [system_prompt]}))
+    print("nested     ->", result)
+    assert "object at 0x" not in result
+
+
 asyncio.run(pattern_direct())
 asyncio.run(pattern_di())
 asyncio.run(injection_demo())
+asyncio.run(forgot_to_render_demo())

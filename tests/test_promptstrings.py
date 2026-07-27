@@ -1720,6 +1720,81 @@ def test_composition_guard_fires_under_strict_mode() -> None:
         asyncio.run(outer.render(PromptContext({"system": inner})))
 
 
+def test_unrendered_prompt_repr_names_the_prompt() -> None:
+    """A prompt object describes itself instead of showing an address (ADR 0011 D5)."""
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    assert repr(inner) == "<unrendered promptstring 'inner'>"
+    # str() falls back to __repr__ and still works (ADR 0011 D3 carve-out).
+    assert str(inner) == "<unrendered promptstring 'inner'>"
+    assert "object at 0x" not in repr(inner)
+
+
+def test_unrendered_generator_repr_names_the_prompt() -> None:
+    """The generator variant is self-describing too (ADR 0011 D5)."""
+
+    @promptstring_generator
+    def inner(topic: str):
+        yield PromptMessage(role="system", content=f"Expert on {topic}.")
+
+    assert repr(inner) == "<unrendered promptstring 'inner'>"
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(lambda p: [p], id="list"),
+        pytest.param(lambda p: (p,), id="tuple"),
+        pytest.param(lambda p: {"k": p}, id="dict"),
+        pytest.param(lambda p: [[[p]]], id="depth-3"),
+        pytest.param(lambda p: {"k": [p]}, id="dict-of-list"),
+    ],
+)
+def test_nested_unrendered_prompt_is_named_not_an_address(wrap) -> None:
+    """A prompt nested in a container renders self-describing, never an address.
+
+    The D3 guard cannot see through containers — they format their elements
+    with repr(). D5 covers every container type and depth without enumerating
+    any. This is the documented second tier: named, not raised.
+    """
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    result = asyncio.run(outer.render(PromptContext({"system": wrap(inner)})))
+    assert "object at 0x" not in result
+    assert "<unrendered promptstring 'inner'>" in result
+
+
+def test_nested_unrendered_prompt_in_dataclass_is_named() -> None:
+    """Coverage follows from repr(), so it reaches types no container list names."""
+    from dataclasses import dataclass
+
+    @promptstring
+    def inner(topic: str) -> None:
+        """Expert on {topic}."""
+
+    @promptstring
+    def outer(system: str) -> None:
+        """System: {system}"""
+
+    @dataclass
+    class Wrapper:
+        prompt: object
+
+    result = asyncio.run(outer.render(PromptContext({"system": Wrapper(prompt=inner)})))
+    assert "object at 0x" not in result
+    assert "<unrendered promptstring 'inner'>" in result
+
+
 def test_composition_guard_sets_missing_key_none_on_dynamic_path() -> None:
     """missing_key is None on the t-string raise site too, not just the static one."""
     from string.templatelib import Template

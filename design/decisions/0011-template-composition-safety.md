@@ -108,7 +108,65 @@ Add `examples/12_template_composition.py` demonstrating:
 - the DI composition pattern (`AwaitPromptDepends` resolver that renders inner)
 - a note on shared-ctx key naming
 
+### D5 — Self-describing `__repr__`; the guarantee is two-tier
+
+D3 fires only when a prompt object *is* the parameter value. It cannot see one
+nested inside a container, because containers format their elements with
+`repr()`, not `str()` — so `[inner]` still rendered
+`[<promptstrings.core._PromptString object at 0x...>]`.
+
+Define `__repr__` on `_PromptString` and `_PromptStringGenerator`:
+
+```
+<unrendered promptstring 'inner'>
+```
+
+**Why repr rather than walking containers.** A recursive guard is an
+enumeration — `list`, `dict`, `tuple`, then `set`, `namedtuple`, dataclass,
+third-party collections — and every type not yet listed is the same leak again.
+Self-description has no list to maintain: coverage follows from the object
+naming itself, so it reaches any container, any depth, and types a container
+list would never name (a dataclass field, for instance). It also costs nothing
+on the render path: `repr()` runs only when something already converts the
+object to text, i.e. only in the bug case. Walking a container, by contrast, was
+measured at 49% of total render time for a 100-element list, 361% for a
+1,000-key dict, and 486% for a 10,000-element list — the guard would have become
+the dominant cost of rendering data-heavy parameters.
+
+The text is deliberately neutral rather than instructional: in the failure case
+this string is substituted into a prompt sent to a model, and an imperative
+sentence there invites the model to act on it.
+
+**The guarantee is therefore two-tier, and must be documented as such:**
+
+| Where the prompt object sits | Behaviour |
+|---|---|
+| Parameter value (top level) | `PromptRenderError` — D3 |
+| Nested inside any structure | Rendered as `<unrendered promptstring 'name'>` — D5, no raise |
+
+Stating only the first tier would leave users believing nested cases raise. The
+second tier is a diagnosable string, not an error.
+
+`str(prompt_object)` continues to work — Python falls back to `__repr__` when
+`__str__` is undefined — so the D3 carve-out for debugging is preserved and in
+fact improved: the previous value was an address.
+
+This is not a compatibility event. The previous repr embedded a memory address,
+which varies between runs, so no user code could hold a stable assertion on it.
+
 ## Alternatives considered
+
+- **Recursively walking container parameter values** — rejected. It is an
+  unbounded enumeration of container types (each omission is the same defect
+  again), and it is measurably expensive on the render path: up to 4.9× the
+  cost of the render itself for a large list parameter. D5 achieves wider
+  coverage at zero render-path cost.
+
+- **Moving the D3 check into `_resolve_dependencies`** — rejected. It is a real
+  single choke point (all render paths call it), but it sees the same top-level
+  values, so it does not close the nesting gap at all; and it would *lose*
+  coverage of t-string interpolations of non-parameter values, which
+  `_render_dynamic` currently catches.
 
 - **`_PromptString.__str__` raises `TypeError`** — rejected. `str()` raising is
   a violation of Python convention and would break any code that legitimately
@@ -145,6 +203,11 @@ Add `examples/12_template_composition.py` demonstrating:
   runnable example.
 - **Negative:** D3 adds one isinstance check per substituted parameter in both
   `_render_static` and `_render_dynamic`; negligible runtime cost.
+- **Positive:** D5 removes the address-repr failure at every container type and
+  depth without enumerating container types and without any render-path cost.
+- **Neutral:** the composition guarantee is two-tier — raise at top level, named
+  string when nested. This boundary is documented rather than closed; closing it
+  would require the container walk rejected above.
 - **Neutral:** `PromptContext` scoping is explicitly deferred; shared-ctx naming
   discipline is the documented mitigation.
 

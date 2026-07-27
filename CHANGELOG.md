@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default token scope.
 - README: a "Structured output" section documenting `response_schema` (shipped in 1.2.0,
   previously undocumented).
+- `@promptstring` / `@promptstring_generator` objects now have a self-describing `__repr__` —
+  `<unrendered promptstring 'name'>` instead of `<promptstrings.core._PromptString object at
+  0x...>` (ADR 0011, D5). This covers the nested case the D3 guard cannot reach: containers
+  format their elements with `repr()`, so a prompt object inside a list, dict, tuple, dataclass,
+  or any depth of nesting previously rendered an opaque address into the prompt.
+  - **The composition guarantee is two-tier.** A prompt object passed *as* a parameter value
+    raises `PromptRenderError` (D3). A prompt object *nested inside* a structure does **not**
+    raise — it renders as `<unrendered promptstring 'name'>`. Nested cases are named, not
+    rejected.
+  - Coverage follows from the object describing itself, so it requires no list of container
+    types and adds no cost to the render path.
+  - `str(prompt_object)` still works (Python falls back to `__repr__`), preserving the D3
+    debugging carve-out. Not a compatibility event: the previous repr embedded a memory
+    address and so could never be asserted on stably.
 
 ### Fixed
 - README: the dishka example did not compile. It used `{user.name}` as a placeholder, which the
