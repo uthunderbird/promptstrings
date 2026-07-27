@@ -10,12 +10,17 @@
 
 ## Context
 
-`core.py` is 1,401 lines with 34 top-level definitions: five error classes, three
-Protocols, four public data types, two render engines (`_PromptString` 245 lines,
-`_PromptStringGenerator` 214 lines), a configuration carrier, and fifteen
-module-level functions. The size itself is tolerable; the problem is that the
-file has no internal boundaries, so there is no unit whose responsibility can be
-stated in one sentence — which is what documentation needs.
+`core.py` is 1,401 lines with **43 top-level bindings**, counted from the AST:
+21 classes, 14 functions, and 8 module-level assignments. The classes are five
+errors, two Protocols (`Observer`, `Promptstring`), three Observer events, seven
+public data types, the no-op observer, two render engines (`_PromptString` 243
+lines, `_PromptStringGenerator` 212), and the `Promptstrings` configuration
+carrier. Every count in this ADR uses this same 43-binding census; where a table
+below claims to partition the file, it partitions all 43.
+
+The size itself is tolerable; the problem is that the file has no internal
+boundaries, so there is no unit whose responsibility can be stated in one
+sentence — which is what documentation needs.
 
 Separately, five integration directions were requested: Jinja2 as the renderer,
 Phoenix/Langfuse for prompt observability, the same tools for prompt management,
@@ -48,16 +53,24 @@ class to give them an owner would produce single-method stateless classes, which
 is a function with extra syntax, and would make both reading and documentation
 worse.
 
-The observation behind the request is nonetheless correct. Those fifteen
+The observation behind the request is nonetheless correct. All **14** module-level
 functions are not one heap; they are **four cohesive groups with no boundary
 between them**:
 
-| Group | Functions |
-|---|---|
-| Signature introspection | `_get_param_type_hints`, `_annotated_markers`, `_response_schema_from_hints`, `_has_dynamic_return_annotation` |
-| Template grammar and rendering | `_parse_docstring`, `parse_trusted_template`, `_render_static`, `_render_dynamic`, `_placeholders_from_template`, `_is_unrendered_prompt` |
-| Dependency resolution | `_resolve_dependencies`, `_maybe_await` |
-| Observability plumbing | `_fire_observer` |
+| Group | Functions | n |
+|---|---|---|
+| Signature introspection | `_get_param_type_hints`, `_annotated_markers`, `_response_schema_from_hints`, `_has_dynamic_return_annotation` | 4 |
+| Template grammar and rendering | `_parse_docstring`, `parse_trusted_template`, `_render_static`, `_render_dynamic`, `_placeholders_from_template`, `_is_unrendered_prompt`, `_compile_at_decoration` | 7 |
+| Dependency resolution | `_resolve_dependencies`, `_maybe_await` | 2 |
+| Observability plumbing | `_fire_observer` | 1 |
+
+`_compile_at_decoration` is the one function that straddles two of these groups:
+it calls `_has_dynamic_return_annotation` (introspection) *and* `_parse_docstring`
+(templates). It is assigned to the template group because its **output** is a
+compiled `Template` and its failure mode is `PromptCompileError` — it consumes
+introspection rather than belonging to it. This is the sharpest test of the
+`introspection` / `templates` boundary defended in D8a, so it is named here
+rather than left implicit.
 
 The remedy is module boundaries, not class membership. Everything below follows
 from that correction: if the OO justification were kept, it would pull in classes
@@ -88,23 +101,72 @@ def greet(name: str) -> str:
 greet.placeholders            # frozenset({'name'})
 
 # Delegated — the function renders; the library types, injects, and observes
+_env = jinja2.Environment(loader=jinja2.FileSystemLoader("prompts"))
+
 @promptstring
-def system_prompt(ctx: Context, usr: User) -> PromptSource:
-    return jinja2.render("path/to/prompt.jinja2", ctx=ctx, usr=usr)
+def system_prompt(usr: User) -> PromptSource:
+    text = _env.get_template("system.jinja2").render(usr=usr)
+    return PromptSource(content=text, provenance=provenance_from_file("prompts/system.jinja2"))
 
 system_prompt.placeholders    # frozenset() — by construction
 ```
+
+The example is written out in full deliberately. Jinja2 has no module-level
+`render(path, **kw)`; and returning the bare `str` that `_env...render()` produces
+would satisfy the runtime — `_resolve_source` accepts a plain `str` — while
+failing `mypy` against the `-> PromptSource` annotation that
+`_has_dynamic_return_annotation` requires in order to route the function to the
+delegated path at all. Wrapping in `PromptSource` is not decoration: it is what
+makes the annotation true *and* what gives provenance somewhere to live (D4).
 
 **The two classes MUST be documented as carrying different guarantees.** The
 predictable failure is a user writing a delegated prompt and expecting strict
 checks that cannot exist there. The distinction is not a limitation to hide; it
 is the contract.
 
-Everything the library offers *besides* rendering — typed parameters, dependency
-injection, provenance, observer events, `response_schema`, error legibility —
-applies identically to both classes. That is what "typed stub" means concretely:
-the library is a typed, DI-aware, observable wrapper around prompt text, and
-rendering is one pluggable part of it rather than its centre.
+Most of what the library offers besides rendering — typed parameters, dependency
+injection, observer events, error legibility — applies to both classes. That is
+what "typed stub" means concretely: the library is a typed, DI-aware, observable
+wrapper around prompt text, and rendering is one pluggable part of it rather than
+its centre.
+
+**But the guarantees are not otherwise symmetric, and the asymmetries run in both
+directions.** An earlier draft of this ADR claimed they did apply identically;
+that was false, and the exceptions are structural rather than incidental:
+
+| Capability | Owned | Delegated | Why |
+|---|---|---|---|
+| `placeholders` / strict mode | yes | **no** | the text is never parsed |
+| `response_schema` | yes | **no** | `_response_schema_from_hints` returns `None` for `str`, `Template`, and `PromptSource` — exactly the return annotations that route a function to the delegated path |
+| provenance | **no** | yes | the static render path sets `provenance = None` unconditionally; only a returned `PromptSource` carries it |
+| available on `@promptstring_generator` | yes | **no** | see below |
+
+The `response_schema` exclusion is the sharp one: structured output is unavailable
+in delegated mode *by the same mechanism* that enables delegated mode. A user
+cannot have both a Jinja2-rendered prompt and a typed response schema on the same
+`@promptstring`. That is a real cost of D3, not a detail, and it is not fixed by
+this ADR.
+
+**Delegation does not exist for `@promptstring_generator`.** The generator engine
+accepts only `Role`, `PromptMessage`, `str`, and `Template` yields and raises
+`PromptRenderError("Unsupported promptstring generator yield type")` for anything
+else — a generator cannot yield or return a `PromptSource`. Consequently D4
+(file-backed provenance) and D5 (`handle`) are unreachable from generators, whose
+`RenderEndEvent` hardcodes `provenance=None`.
+
+This is uncomfortable, because the vendors D5 is grounded on produce
+**multi-message** chat prompts — the shape the generator engine exists for. So the
+scope of this ADR's delegated model must be stated exactly: **it is designed and
+argued for `_PromptString` only.** Extending delegation to the generator engine is
+a real piece of work (a `PromptSource` yield type, provenance per message, and a
+decision about whether provenance is per-message or per-render) and is
+deliberately **not** decided here.
+
+`[HELD — owner decision]` Whether to extend delegation to generators before or
+after the split. The recommendation is after: it is a feature with its own design
+questions, while the split is a zero-behaviour-change refactor, and bundling them
+would make the refactor unverifiable by the "moves code, does not edit logic"
+gate in D9.
 
 ### D3 — No `Renderer` Protocol
 
@@ -122,7 +184,11 @@ the function returns text, the question "which engine rendered this" never
 reaches the library. Jinja2, Mustache, an LLM-generated template, or string
 concatenation all work with no library support and no version coupling.
 
-**Consequence:** requested seam 1 requires no new API surface.
+**Consequence:** requested seam 1 requires **no new Protocol and no new type**. It
+is not free of API surface: D4 adds one public helper function for the provenance
+this path would otherwise lose. The precise claim is "no abstraction layer, one
+convenience function," and the running total of new public surface across this ADR
+is stated in D5a.
 
 ### D4 — Provenance for file-backed templates is the real gap in delegated mode
 
@@ -172,49 +238,124 @@ strings.
 class PromptSource:
     content: str
     provenance: PromptSourceProvenance | None = None
-    handle: Any = None          # new
+    handle: Any = field(default=None, compare=False, repr=False, hash=False)  # new
 ```
 
-**Discipline, identical to `PromptContext.extras` (ADR 0002 I-3):** the library
-never reads, interprets, enumerates, or serialises `handle`. It carries it and
-exposes it on `RenderEndEvent` so an observer-based adapter can perform the
-linkage. `handle` is deliberately `Any`: typing it would be the lock-too-early
-mistake this ADR otherwise avoids.
+**The field modifiers are load-bearing, not style.** `PromptSource` is
+`@dataclass(frozen=True)`, so `__eq__`, `__hash__`, and `__repr__` are generated
+over every field. A plain `handle: Any = None` was verified to change all three:
+`hash(PromptSource("x", None, {"a": 1}))` raises `TypeError: unhashable type:
+'dict'` where the two-field version hashes fine, two renders of identical text
+compare unequal when different vendor objects ride along, and `repr()` and
+`dataclasses.asdict()` both leak the vendor object into logs and assertion diffs.
+With `compare=False, repr=False, hash=False` the field is genuinely inert.
 
-**Bounded:** the caller-side ergonomics of Langfuse's `propagate_attributes`
-context manager were not validated end to end in this pass. The field is the
-minimal enabling shape; the adapter contract belongs in a separate ADR alongside
-a real adapter.
+The `PromptContext.extras` precedent (ADR 0002 I-3) does **not** transfer
+unexamined: `extras` defaults to a `dict`, so `PromptContext` was never hashable
+and never had value equality. The discipline sentence was free there and is not
+free here.
+
+**Discipline:** the library never reads, interprets, or enumerates `handle`; with
+the modifiers above it also never serialises it. It carries it and exposes it on
+`RenderEndEvent`. `handle` is deliberately `Any`: typing it would be the
+lock-too-early mistake this ADR otherwise avoids.
+
+**This amends a numbered Promise, not a non-promise.** `RenderEndEvent` is defined
+verbatim in ADR 0002 **Promise I-2** as an exact four-field frozen dataclass.
+Exposing `handle` on it widens a 1.0 promise, which the revisions table below now
+records. The amendment is append-only and keyword-safe:
+
+```python
+@dataclass(frozen=True)
+class RenderEndEvent:
+    prompt_name: str
+    elapsed_ns: int
+    message_count: int
+    provenance: PromptSourceProvenance | None
+    handle: Any = field(default=None, compare=False, repr=False, hash=False)  # new
+```
+
+Existing observers keep working; existing positional construction keeps working
+because the new field is last and defaulted.
+
+**Bounded, and honestly so.** Two things are *not* established here:
+
+1. **The caller-side path.** `render()` returns `str` and `render_messages()`
+   returns `PromptMessage`; neither carries `handle`. Only the Observer sees it.
+   Langfuse's own mechanism (`propagate_attributes(prompt=...)`, SDK ≥ 4.14) is a
+   context manager wrapping the generation call, so an observer *can* set it — but
+   this was not validated end to end.
+2. **Whether the field is necessary at all.** In delegated mode the user's own
+   function constructed the vendor prompt object, so the user already holds it and
+   can pass it to their own generation call with no library involvement. `handle`
+   earns its place only if the linkage should work *without* the call site knowing
+   about it.
+
+`[HELD — owner decision]` D5 ships only if (2) is answered yes. Until then it is a
+recommendation with a validated shape, not a committed change. The recommendation
+is to **defer D5 to the adapter ADR** and build a real Langfuse adapter first: a
+field added for a linkage nobody has performed is exactly the lock-too-early
+mistake this ADR credits ADR 0002 for avoiding.
+
+### D5a — Total new public surface
+
+| Item | Kind | Status |
+|---|---|---|
+| `provenance_from_file` | new function | proposed (D4) |
+| `PromptSource.handle` | new field on existing type | held (D5) |
+| `RenderEndEvent.handle` | new field on existing type, amends Promise I-2 | held (D5) |
+
+If D5 is deferred as recommended, this ADR's entire net public surface change is
+**one helper function**. The split itself (D8–D9) adds nothing.
 
 ### D6 — OpenTelemetry needs no change; N-1 stands
 
 Requested seam 3 — spans inside a prompt generator — **already works**, and this
 was verified rather than assumed.
 
-`asyncio.gather`, `create_task`, and `asyncio.wait` each copy the current context
-into the spawned task. A contextvar set before dependency resolution is therefore
-visible inside every resolver, including the concurrent ones. An adapter that
-opens a span in `on_render_start` and activates it becomes the parent of any span
-opened inside a resolver or generator body, automatically.
+The library resolves concurrent async dependencies with
+`asyncio.ensure_future(...)` followed by
+`asyncio.wait(..., return_when=FIRST_EXCEPTION)` — deliberately **not**
+`asyncio.gather`, per ADR 0008 (gather leaves siblings running). `ensure_future`
+creates a Task, and task creation copies the current context; `asyncio.wait`
+itself spawns nothing and is not a propagation mechanism.
+
+Verified against those exact primitives: a contextvar set before dependency
+resolution is visible inside every concurrently-resolved resolver. An adapter that
+opens a span in `on_render_start` and activates it therefore becomes the parent of
+any span opened inside a resolver or generator body, automatically.
 
 ADR 0002's N-1 (core does not import `opentelemetry`) and N-10 (the Observer is
 not invoked from resolver tasks) both stand. N-10 restricts where *Observer
 callbacks* fire; it does not restrict span nesting, which rides on contextvars.
 
-**Known residual, recorded not solved:** the library still emits no spans for its
-*own* phases — one aggregate `elapsed_ns` cannot say which of six resolvers spent
-the time. This is a real observability limitation and is expected to return as a
-feature request. It is out of scope here because closing it means either changing
-the Observer contract or emitting spans from core, and neither is justified by a
-named consumer today.
+**Known residuals, recorded not solved:**
 
-### D7 — LLM-framework interop requires nothing; no adapters
+- The library emits no spans for its *own* phases — one aggregate `elapsed_ns`
+  cannot say which of six resolvers spent the time. Closing it means changing the
+  Observer contract or emitting spans from core, and neither is justified by a
+  named consumer today.
+- The propagation test covers task creation. **Not** tested: a synchronous
+  observer holding an OTel context across the `await` boundary between
+  `on_render_start` and `on_render_end` (attach/detach spanning suspension is
+  where OTel context leaks between concurrent renders), and sync resolvers
+  dispatched to a thread executor. An adapter author must validate both; this ADR
+  claims nesting works, not that every OTel usage pattern is safe.
 
-Requested seam 4 does not exist as a task. pydantic-ai's extension point is a
-function returning `str` (`@agent.system_prompt def f(ctx) -> str`), satisfied by
-`await prompt.render(ctx)` inside it. OpenAI's chat format is a list of
-`{role, content}`, and `render_messages()` already returns `PromptMessage` with
-exactly those fields; conversion is a dict comprehension.
+### D7 — LLM-framework interop needs no adapters
+
+Requested seam 4 needs no library change, but "requires nothing" was too strong.
+
+pydantic-ai's extension point is a function returning `str`
+(`@agent.system_prompt def f(ctx) -> str`). Its `ctx` is a `RunContext`, not a
+`PromptContext`, so the call site is `await prompt.render(PromptContext({...}))`
+with a small mapping step — not a bare pass-through. OpenAI's chat format is a
+list of `{role, content}`; `render_messages()` returns `PromptMessage`, which has
+three fields (`role`, `content`, `source`) and an unconstrained `role: str`, so
+conversion is a dict comprehension that drops `source` and trusts the role value.
+
+Both costs are one line at the call site. That is the actual claim: **small and
+call-site-local, not zero.**
 
 Shipping `to_openai()` / `to_pydantic_ai()` helpers would add public surface,
 vendor coupling, and a maintenance obligation to save one line. Rejected.
@@ -265,13 +406,28 @@ Why this rather than the alternatives:
   documented extension surface (ADR 0001 Promise 2) and a structural check would
   break third-party implementations. A private marker base is nominal by
   construction, and the public Protocol is untouched.
-- **It costs nothing.** Still one `isinstance` per substituted value, on the
-  hot path measured in ADR 0011 D5.
-- **It does not leak.** Verified: `type(p).__mro__` is already
-  `['_PromptString', 'object']`, so a private name is already observable there;
-  ADR 0001 explicitly places `type(promptstring)` outside the contract; the
-  object's public attributes are unchanged; and `isinstance(p, Promptstring)`
-  against the public Protocol still holds.
+- **It costs nothing.** Still one `isinstance` per substituted value — the same
+  guard ADR 0011 D3 introduced, unchanged in kind and count. (The measurements in
+  ADR 0011 D5 priced *container-walking*, not this check; they are not evidence
+  for this bullet and are not cited as such.)
+- **What it changes is enumerable, and none of it is contract.** Inserting a base
+  is not a no-op, so the honest form is a list rather than an appeal to what is
+  already visible. Changed: `__bases__`, `__base__`, `__mro__` (from
+  `(_PromptString, object)` to `(_PromptString, _PromptObject, object)`), and
+  `isinstance(p, _PromptObject)` becomes `True`. Unchanged and verified: the
+  object's five public attributes (`declared_parameters`, `placeholders`,
+  `render`, `render_messages`, `response_schema`), and `isinstance(p, Promptstring)`
+  against the public Protocol. The engines are plain classes — no `@dataclass`, no
+  `__slots__` — so there is no dataclass, slots, or pickle-protocol interaction,
+  and `Promptstring` is a data Protocol where `runtime_checkable` `isinstance`
+  remains legal.
+
+  Note what is *not* being cited: ADR 0001 places `type(promptstring)` — the
+  **decorator object** — outside the contract, which says nothing about
+  `type(p)` for a decorated prompt. The argument stands on the enumeration above,
+  not on that clause. The one population that could observe a difference is
+  anyone subclassing an engine, which no promise supports and no code in this
+  repository does.
 
 Rejected alternatives:
 
@@ -291,17 +447,36 @@ Rejected alternatives:
 
 Nine modules. With the cycle broken by D8, the module graph is acyclic.
 
-| Module | Responsibility (one sentence) | ~lines |
-|---|---|---|
-| `errors.py` | The exception hierarchy and its field schema (ADR 0003). | 234 |
-| `types.py` | Public data types, the `Promptstring` Protocol, and the private `_PromptObject` marker. | 95 |
-| `observability.py` | The `Observer` Protocol, its three events, the no-op default, and exception-swallowing dispatch. | 85 |
-| `introspection.py` | Reading a decorated function's signature, type hints, and `Annotated` markers. | 95 |
-| `templates.py` | The owned-prompt grammar: parsing, placeholder extraction, compilation, and the two render functions. | 145 |
-| `resolution.py` | Resolving declared parameters from a `PromptContext`, including concurrent async resolvers. | 90 |
-| `prompts.py` | The single-message prompt engine (`_PromptString`). | 245 |
-| `generators.py` | The multi-message generator engine (`_PromptStringGenerator`). | 215 |
-| `factory.py` | The `Promptstrings` configuration carrier and the module-level decorator bindings. | 72 |
+This table is a **complete assignment of all 43 top-level bindings**, not a prose
+summary — an executor should not have to re-derive where anything goes. Line
+figures are measured definition bodies and exclude each module's imports and
+docstring, which is why they sum to less than 1,401.
+
+| Module | Responsibility (one sentence) | Bindings | body lines |
+|---|---|---|---|
+| `errors.py` | The exception hierarchy and its field schema (ADR 0003). | `PromptRenderError`, `PromptCompileError`, `PromptStrictnessError`, `PromptUnusedParameterError`, `PromptUnreferencedParameterError` | 234 |
+| `types.py` | Public data types, the `Promptstring` Protocol, and the private `_PromptObject` marker. | `_PromptObject` (new), `Promptstring`, `PromptMessage`, `Role`, `PromptSourceProvenance`, `PromptSource`, `PromptContext`, `Resolver`, `PromptDepends`, `AwaitPromptDepends` | 104 |
+| `observability.py` | The `Observer` Protocol, its three events, the no-op default, and exception-swallowing dispatch. | `RenderStartEvent`, `RenderEndEvent`, `RenderErrorEvent`, `Observer`, `_NoOpObserver`, `_observer_logger`, `_fire_observer` | 89 |
+| `introspection.py` | Reading a decorated function's signature, type hints, and `Annotated` markers. | `_INTERNAL_RETURN_TYPES`, `_get_param_type_hints`, `_annotated_markers`, `_response_schema_from_hints`, `_has_dynamic_return_annotation` | 92 |
+| `templates.py` | The owned-prompt grammar: parsing, placeholder extraction, compilation, and the two render functions. | `_MISSING`, `_parse_docstring`, `parse_trusted_template`, `_placeholders_from_template`, `_is_unrendered_prompt`, `_render_static`, `_render_dynamic`, `_compile_at_decoration` | 116 |
+| `resolution.py` | Resolving declared parameters from a `PromptContext`, including concurrent async resolvers. | `_maybe_await`, `_resolve_dependencies` | 87 |
+| `prompts.py` | The single-message prompt engine (`_PromptString`). | `_PromptString` | 243 |
+| `generators.py` | The multi-message generator engine (`_PromptStringGenerator`). | `_strict_heuristic_logger`, `_PromptStringGenerator` | 213 |
+| `factory.py` | The `Promptstrings` configuration carrier and the module-level decorator bindings. | `Promptstrings`, `_default`, `promptstring`, `promptstring_generator` | 71 |
+
+Two placements deserve their reasons stated, because they were the only genuinely
+ambiguous ones:
+
+- **`_compile_at_decoration` → `templates.py`.** It calls into both introspection
+  and templates (see D1). It goes with templates because its output is a compiled
+  `Template` and its failure mode is `PromptCompileError`; it *consumes*
+  introspection rather than belonging to it. The resulting edge
+  `templates → introspection` runs downward and creates no cycle.
+- **`_MISSING` → `templates.py`.** It is an identity sentinel, so placement is a
+  correctness decision, not formatting: `_parse_docstring` constructs it and
+  `_PromptString` tests `i.value is _MISSING` to detect `parse_trusted_template`
+  output. One definition site, imported by `prompts.py`; the edge runs upward from
+  templates to prompts, which is the allowed direction.
 
 Dependency layers, top depending only on those below it:
 
@@ -325,9 +500,25 @@ decisions, while introspection changed in 1.2.0 for `response_schema` (ADR 0009)
 and in ADR 0007 for `Annotated` DI. Different change drivers, different modules.
 
 **Why `prompts` and `generators` are separate** despite being the two largest
-units: their strict-mode mechanisms are not variants of one thing. `_PromptString`
-checks placeholders structurally; `_PromptStringGenerator` uses a substring
-heuristic (ADR 0004). Two mechanisms, two ADRs, two modules.
+units. An earlier draft argued this from strict-mode mechanism — structural in
+one engine, substring-heuristic in the other. That argument is **wrong** and is
+retracted: the generator computes `all_structured` and takes the structural path
+when its yields are all `Template`s with resolvable identifier expressions,
+falling back to the heuristic only for `str` and mixed yields. The two engines
+share the mechanism.
+
+The surviving reasons are weaker and are stated as such:
+
+1. They are 243 and 213 lines and have no call edge between them — the only two
+   symbols of that size in the file that are mutually independent.
+2. Their *yield contracts* genuinely differ: one produces a single string from one
+   template; the other consumes a stream of `Role` / `PromptMessage` / `str` /
+   `Template` yields and does not support `PromptSource` at all (D2). That
+   difference is what makes delegation available to one and not the other, so it
+   is a real behavioural boundary rather than a stylistic one.
+
+This is the weakest boundary in the table. Merging them into one ~460-line
+`prompts.py` is a defensible alternative and would not violate any layer rule.
 
 **Recorded objection (Schlawack, not resolved in this ADR's favour):** four of
 nine modules are under 100 lines, and `factory.py` at 72 lines holding four
@@ -361,26 +552,67 @@ Migration is confined to the package: `from .core import (...)` occurs in exactl
 one place, `__init__.py`. No test and no example imports from
 `promptstrings.core` — verified by search, not assumed.
 
-`promptstrings.core` is retained as a thin re-export module, for anyone outside
-the repository who imported from it directly. Versions 1.0.0, 1.1.0 and 1.2.0 are
-published on PyPI; adoption is unknown, and unknown is not zero. The shim
-re-exports the private engine names as well (`_PromptString`,
-`_PromptStringGenerator`), since those are what an outside debugger or test would
-have reached for.
+`promptstrings.core` is retained as a re-export module for anyone outside the
+repository who imported from it directly. Versions 1.0.0, 1.1.0 and 1.2.0 are
+published on PyPI; adoption is unknown, and unknown is not zero.
+
+**The shim re-exports all 43 bindings, not a chosen subset.** Re-exporting only
+the public 21 plus the two engines would break the very population the shim exists
+for — an outside debugger or test reaching for `_render_static`, `_MISSING`, or
+`_resolve_dependencies`. Since the shim is mechanical, completeness is free.
+
+Two shim properties the repository's own tooling forces, which a naive
+`from .errors import X` would fail:
+
+- `pyproject.toml` sets `mypy strict = true`, hence `no_implicit_reexport`, so
+  downstream typed code doing `from promptstrings.core import X` fails unless the
+  shim declares its own `__all__` (or uses `X as X`). The shim therefore carries
+  an `__all__` listing all 43 names.
+- `ruff` selects `F`, so unused re-exports trip `F401`. The `__all__` declaration
+  resolves this too.
+
+**What the shim cannot preserve, stated plainly:** re-export does not preserve
+monkeypatch targets. `monkeypatch.setattr("promptstrings.core._render_static", ...)`
+currently changes library behaviour; after the split the library resolves that
+name in `templates.py` and the patch becomes a silent no-op. Anyone patching
+internals must retarget to the defining module. This is a real break for a real
+(if small) population, and no gate below detects it — it is accepted and
+documented, not solved.
+
+**Pickle:** pickled instances embed the defining module, verified —
+`pickle.dumps(PromptRenderError("x"))` currently emits `promptstrings.core`. Old
+pickles keep loading through the shim, but pickles produced *after* the split
+cannot be loaded by 1.0.0–1.3.0. For mixed-version workers this is a genuine
+wire-format change. The precise claim is therefore: **no source-level break;
+pickle payload module paths change.**
 
 **Acceptance gates for the split** — it is done only when all of these hold:
 
-1. `from promptstrings import X` succeeds for all 21 public names, and `__all__`
-   is byte-identical to its current value.
+1. `from promptstrings import X` succeeds for all 21 public names, and
+   `promptstrings.__all__` is unchanged (that is the package's `__all__`; the new
+   `promptstrings.core.__all__` is a separate, newly-added list of 43 names).
 2. `import promptstrings` raises no `ImportError` — the layer graph is only
    validated at import time (Cannon's risk in D8a).
-3. `from promptstrings.core import X` still works for the 21 public names and for
-   the two private engine classes.
+3. `from promptstrings.core import X` works for **all 43** pre-split top-level
+   names.
 4. The full gate is green: tests, mypy, ruff, all twelve examples, a built wheel
    installed into a clean virtualenv.
-5. The independent verification script written for 1.3.0 still returns 21/21.
+5. An import-surface equivalence check passes: the set of names reachable from
+   `promptstrings` and from `promptstrings.core` after the split equals the set
+   captured from the pre-split commit. This must be a **committed script in the
+   repository**, not an ad-hoc one — an earlier draft of this gate referred to a
+   verification script that existed only in a scratch directory, which is not a
+   gate at all.
 6. No module's public behaviour changes: the split moves code, it does not edit
-   logic. Any behavioural change discovered mid-split is a separate commit.
+   logic. **Detection mechanism**, since the existing suite tests through the
+   public API and cannot by itself distinguish "moved" from "moved and subtly
+   edited": each moved definition's source text must be byte-identical to its
+   pre-split source, checked mechanically by extracting both with `ast` and
+   comparing. Any definition that must change is a separate commit with its own
+   justification.
+7. The dependency-graph analysis that produced F7 is re-run against the split
+   package and reports no cycle **across modules** — the layering is a claim about
+   the design, and after the split it becomes a checkable property of the code.
 
 **This decouples the two halves of the request.** D8/D8a/D9 (the split) can be
 executed immediately at zero compatibility cost. D5 (the `handle` field) is
@@ -412,7 +644,7 @@ methods, and adds no public attributes.
 
 ## Revisions to ADR 0002
 
-| Non-promise | Outcome | Reason |
+| Clause | Outcome | Reason |
 |---|---|---|
 | **N-1** no OTel in core | **Stands** | Spans nest correctly via contextvars without core importing `opentelemetry` (D6, grounded). |
 | **N-3** no `DependencyResolver` Protocol | **Stands** | No consumer named; `PromptDepends(callable)` still fits every case examined. |
@@ -420,10 +652,19 @@ methods, and adds no public attributes.
 | **N-7** no plugin registry | **Stands** | Nothing in this design needs named-backend lookup. |
 | **N-10** Observer not invoked from resolver tasks | **Stands** | Restricts callback location, not span nesting (D6). |
 | **N-5** no bundled Pydantic adapters | **Formally retired** | Already contradicted in practice: ADR 0007 D4 placed adapters in `src/promptstrings/integrations/` and anticipated `integrations/opentelemetry.py`. This ADR records the supersession that ADR 0007 made without stating. |
+| **Promise I-2** `RenderEndEvent` four-field shape | **Amended if and only if D5 ships** | D5 appends a defaulted, non-comparing `handle` field. This is a **promise-level** change, not a non-promise revision. It is held pending the D5 decision; if D5 is deferred as recommended, I-2 is untouched. |
 
-The headline result is that ADR 0002's lock-too-early reasoning **survived
-contact with the actual consumers**. Four of the five requested seams need no new
-Protocol; the fifth needs one opaque field.
+Two clarifications an earlier draft got wrong:
+
+- **The "lock-too-early" rationale was not ADR 0002's single reason.** ADR 0002
+  uses that phrase once, about `TemplateLoader` and `DependencyResolver` (N-3,
+  N-4). N-1 rests on vendor-neutrality and the adapter-package model; N-7 is
+  stated without a rationale. The accurate result is narrower and still holds:
+  **the lock-too-early reasoning behind N-3 and N-4 survived contact with the
+  actual consumers**, and the other non-promises stand for their own reasons.
+- **The headline count.** Four of the five requested seams need no new Protocol
+  and no new type. Seam 1 costs one helper function (D4); the fifth is a held
+  proposal for two defaulted fields, one of which amends Promise I-2 (D5, D5a).
 
 ## Alternatives considered
 
@@ -472,24 +713,36 @@ Protocol; the fifth needs one opaque field.
 - `handle: Any` is untyped by design and can become a dumping ground if the
   documented discipline is not enforced in review.
 - The library still cannot show where render time goes internally (D6 residual).
+- Monkeypatch targets under `promptstrings.core` silently stop working (D9); no
+  gate detects this.
+- Pickles produced after the split cannot be read by 1.0.0–1.3.0 (D9).
+- Delegated mode remains unavailable on `@promptstring_generator`, and
+  `response_schema` remains unavailable in delegated mode at all (D2). Both are
+  named, neither is fixed here.
 
 **Neutral:**
-- Work order: (1) split per D8 with `__init__.py` unchanged and `core.py` as a
-  shim; (2) verify the full gate — tests, mypy, ruff, all examples, clean-venv
-  wheel install; (3) add `provenance_from_file` (D4); (4) add `PromptSource.handle`
-  and the `RenderEndEvent` field (D5); (5) document the owned/delegated
-  distinction in README and a new example. Steps 1–2 are independent of 3–5.
-- Follow-on ADRs anticipated: a Langfuse adapter contract (validating D5
-  end to end), and — only if a consumer appears — internal-phase spans.
+- Work order: (1) split per D8/D8a — `promptstrings/__init__.py` keeps its current
+  `__all__` and simply imports from the new modules, `core.py` becomes the 43-name
+  shim; (2) verify all seven acceptance gates in D9; (3) add `provenance_from_file`
+  (D4); (4) document the owned/delegated distinction in README and a new example.
+  Steps 1–2 are independent of 3–4, and D5 is not in this work order because it is
+  held.
+- Follow-on ADRs anticipated: a Langfuse adapter contract (which is what would
+  settle D5 by building the linkage before adding the field), delegation for the
+  generator engine, and — only if a consumer appears — internal-phase spans.
 
 ## Grounding
 
 Claims marked as grounded were verified during the session rather than reasoned:
 
 - **F4** — contextvar propagation into concurrent resolver tasks was confirmed by
-  executing `asyncio.gather`, `create_task`, and `asyncio.wait` against a
-  contextvar set on the parent task. All three propagated. This is what retires
-  the proposed Observer change (D6).
+  executing the primitives the library actually uses — `asyncio.ensure_future`
+  followed by `asyncio.wait(..., FIRST_EXCEPTION)` — against a contextvar set on
+  the parent task. Propagation comes from task creation. This is what retires the
+  proposed Observer change (D6). An earlier version of this finding tested
+  `asyncio.gather` and `create_task`; the library uses neither for resolvers, and
+  ADR 0008 records gather being rejected deliberately. The conclusion was
+  unaffected, the evidence was not, and it was re-run.
 - **F5** — pydantic-ai's dynamic system-prompt seam is a function returning `str`;
   OpenAI's chat format is `{role, content}`, already the shape of `PromptMessage`.
 - **F6** — Langfuse exposes `get_prompt().compile(**vars)` and links traces by
@@ -502,12 +755,26 @@ Claims marked as grounded were verified during the session rather than reasoned:
   that was an artefact of counting docstring prose and bare string literals as
   references, and the design was not allowed to proceed on it. The corrected
   analysis excludes both.
-- **F8** — `type(p).__mro__` already exposes the private `_PromptString`, the
-  object's public attributes are five names unrelated to the marker, and
-  `isinstance(p, Promptstring)` holds — so `_PromptObject` changes nothing
-  observable that the contract covers.
+- **F8** — `type(p).__mro__` is `(_PromptString, object)`; the object's public
+  attributes are exactly five and unrelated to the marker; `isinstance(p,
+  Promptstring)` holds; the engines are plain classes with no `@dataclass` or
+  `__slots__`. What the marker changes is enumerated in D8; none of it is
+  contract.
 - **F9** — `from .core import (...)` appears in exactly one file in the
   repository (`__init__.py`); no test or example imports `promptstrings.core`.
+- **F10** — appending a plain `handle: Any = None` to the frozen `PromptSource`
+  dataclass was executed and shown to change `__hash__` (raises `TypeError` for an
+  unhashable handle where the current type hashes fine), `__eq__`, and `__repr__`.
+  This is why D5 specifies `compare=False, repr=False, hash=False` rather than a
+  bare field.
+- **F11** — the generator engine raises `PromptRenderError("Unsupported
+  promptstring generator yield type")` for anything outside `Role`,
+  `PromptMessage`, `str`, `Template`; `_response_schema_from_hints` returns `None`
+  for `str`, `Template`, and `PromptSource`. Together these establish the D2
+  asymmetry table.
+- **F12** — the file census: 21 classes + 14 functions + 8 module-level
+  assignments = 43 bindings, of which exactly two are Protocols (`Observer`,
+  `Promptstring`).
 
 ## Notes
 
@@ -516,17 +783,39 @@ Reframer slot was required by a contested diagnosis, so no independent Synthesiz
 was seated — synthesis was carried by the Moderator. Same-session synthesis is
 weaker than an independent pass.
 
-The seam results (D3–D7) rest on F4–F6; the decomposition (D8–D8a) rests on
-F7–F9. All are tool-grounded and independently re-checkable, and the analysis
-script that produced F7 is worth re-running after the split to confirm the module
-graph matches the design.
+The seam results (D3–D7) rest on F4–F6 and F10–F11; the decomposition (D8–D8a)
+rests on F7–F9 and F12. All are tool-grounded and independently re-checkable, and
+re-running the F7 analysis against the split package is acceptance gate 7.
 
-What remains *not* grounded is the boundary placement itself: the graph proves
-which splits are **possible** (acyclic), not which are **best**. The argument
-that `introspection` and `templates` change for different reasons is an appeal to
-release history, and the argument that `factory` deserves its own module is an
-appeal to a future that has not happened. Those two are the weakest claims in
-this ADR and the right targets for review.
+This document was adversarially reviewed by four independent cold readers with no
+access to the reasoning that produced it. They found, and this version repairs:
+a false claim that owned and delegated prompts carry identical guarantees
+(`response_schema` and provenance both break the symmetry, and delegation does not
+exist for generators at all); a wrong file census; a module table that partitioned
+35 of 43 bindings and silently omitted the one function straddling a boundary; a
+grounding that tested asyncio primitives the library does not use; a
+`prompts`/`generators` boundary justified by a mechanism difference that does not
+exist; a `handle` field described as inert that would have changed hashing and
+equality; an amendment to a numbered Promise recorded as if it were a non-promise
+revision; and an acceptance gate naming a script that was never committed. One
+finding was **rejected** on checking: the claim that 1.3.0 is published on PyPI
+confused the version in `pyproject.toml` with the released one — PyPI carries
+1.0.0, 1.1.0, and 1.2.0, as stated.
+
+What remains *not* grounded is boundary placement. The graph proves which splits
+are **possible** (acyclic), not which are **best**. Three claims are the weakest
+in this ADR and the right targets for further review:
+
+1. `prompts` / `generators` as separate modules — its original justification was
+   refuted and the replacement is weaker (D8a).
+2. `factory` deserving its own 71-line module — an appeal to a future that has
+   not happened.
+3. `introspection` and `templates` staying apart — an appeal to release history,
+   with `_compile_at_decoration` sitting on the seam.
+
+Two decisions are **held for the owner** and the ADR is not complete without them:
+whether D5 ships at all or defers to an adapter ADR (D5), and whether delegation
+is extended to the generator engine before or after the split (D2).
 
 Companion ADRs: [`0001`](0001-api-and-dx-baseline-for-1.0.md) (the 1.0 contract),
 [`0002`](0002-integration-seams-for-1.0.md) (integration seams, partially revised
