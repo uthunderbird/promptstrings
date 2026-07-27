@@ -791,6 +791,55 @@ new example, including the asymmetry table.
 delegation for the generator engine is a feature with its own design questions.
 Neither belongs in the split.
 
+## Execution record (2026-07-27)
+
+Steps 0–4 are done. `core.py` is nine modules, largest 280 lines; all seven
+gates, `ruff`, `mypy strict`, the test suite, the twelve examples, and a
+clean-virtualenv wheel install pass, and the module import graph is the DAG this
+ADR specifies. `tools/split_gate.py` and its captured baseline are committed, so
+the gates are re-runnable by anyone.
+
+Three things the design did not anticipate, recorded because the next refactor
+will meet them again:
+
+1. **The phantom cycle came back during execution.** The generator that produced
+   the modules computed each module's imports by walking names, and treating bare
+   string literals as references made `getattr(fn, "__name__", "promptstring")`
+   look like a dependency on the `promptstring` decorator. `prompts` therefore
+   imported `factory`, and the package failed to import. This is the *same* false
+   edge the F7 analysis had to exclude — the design knew about it and the
+   implementation still reproduced it. Worth stating plainly: excluding it from
+   the analysis does not protect the tool that acts on the analysis.
+
+2. **Gate 6 passed while silently broken.** `ast.get_source_segment` starts at the
+   `def`/`class` line, so the first generated modules lost every `@dataclass`
+   decorator. The baseline was captured with the same function, so both sides
+   were equally wrong and the comparison passed. Only `mypy` caught it, through
+   the downstream symptom of unexpected keyword arguments. A frozen dataclass
+   silently demoted to a plain class still imports and would very likely survive a
+   test suite that exercises the public API. **A gate that derives both sides of
+   its comparison from one helper cannot detect a defect in that helper** — the
+   design's confidence in gate 6 was misplaced, and the fix was to make the helper
+   decorator-aware on both sides.
+
+3. **Gate 5b was too strict as written.** Pre-split, `promptstrings.core` exposed
+   every module it imported, so `promptstrings.core.asyncio` and `.Any` were
+   reachable through it. That is incidental leakage, not surface; preserving it
+   would mean re-exporting `asyncio` from a shim. The gate now protects the names
+   `core` *defined* and reports the 24 incidental attributes as an accepted
+   difference. This is a real, if unreachable-in-practice, observable change that
+   D9's compatibility argument did not mention.
+
+One further finding from doing the work: **`_INTERNAL_RETURN_TYPES` is dead
+code** — defined in the old `core.py` and referenced nowhere. It was moved to
+`introspection.py` unchanged rather than deleted, because the split moves code and
+does not edit it. Removing it is a separate, trivial commit.
+
+Also of note: `ruff format` must **not** be run as part of the split. The
+pre-split `core.py` was not format-clean (CI runs `ruff check`, not
+`ruff format --check`), so formatting would rewrite definition bodies and fail
+gate 6 for reasons unrelated to the refactor.
+
 ## Revisions to ADR 0002
 
 | Clause | Outcome | Reason |
