@@ -276,10 +276,21 @@ Add a helper that derives provenance from a template file:
 def provenance_from_file(
     path: str | os.PathLike[str],
     *,
+    source_id: str | None = None,
     version: str | None = None,
     provider_name: str | None = None,
 ) -> PromptSourceProvenance: ...
 ```
+
+**`source_id` was added during implementation and is not in the signature this
+ADR originally specified.** Writing the example exposed the gap: `as_posix()`
+stops Windows separators from making provenance machine-specific, but any code
+that locates templates from `__file__` holds an *absolute* path, which is
+machine-specific in exactly the same way — the first run of the example emitted
+`source_id='/Users/…/examples/_expert_template.txt'`. Fixing half of the problem
+and leaving the other half is worse than not claiming the property, so the
+override lets the recorded identity be repository-relative while the read stays
+absolute.
 
 - `source_id` is `PurePath(path).as_posix()` — **not** `str(path)`, and not
   resolved to an absolute path. Absolute paths are machine-specific, and

@@ -152,10 +152,22 @@ metadata) with `provenance=PromptSourceProvenance(source_id, version,
 hash, provider_name)` causes that provenance to flow, unchanged, to
 every message produced from that render. Downstream observers, logs, eval
 collectors, and audit systems can trace any rendered output back to
-the exact template that produced it. The library never authors
-provenance — it does not synthesize hashes, does not assign versions
-— so the user's existing versioning scheme (git SHA, content hash,
-registry version, anything) is respected.
+the exact template that produced it.
+
+**The render path never authors provenance.** It does not synthesize
+hashes, does not assign versions, and does not infer identity — so the
+user's existing versioning scheme (git SHA, content hash, registry
+version, anything) is respected.
+
+One opt-in helper stands outside that path, and is named here because an
+unqualified "the library never authors provenance" would contradict it:
+`provenance_from_file(path, *, version=None, provider_name=None)`
+computes a `sha256` over a template file and records its path, for the
+common case where a delegated prompt renders from a file on disk (ADR
+0012 D4). Calling it is explicit, `version` remains entirely the
+caller's, and nothing in the render path reaches for it. Authorship
+stays something the user chooses, never something the library does on
+their behalf.
 
 #### Important scope boundary
 

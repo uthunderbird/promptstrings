@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `core.py` is split into nine modules (ADR 0012): `errors`, `types`, `observability`,
   `introspection`, `templates`, `resolution`, `prompts`, `generators`, `factory`. **No public
-  API change** — every name still imports from `promptstrings`, `promptstrings.__all__` is
-  unchanged, and `promptstrings.core` remains as a shim re-exporting all 43 pre-split names.
+  API change** — every name still imports from `promptstrings`, the split removed nothing from
+  `promptstrings.__all__`, and `promptstrings.core` remains as a shim re-exporting all 43
+  pre-split names. (`provenance_from_file` below is an addition by a separate decision, not by
+  the split.)
   - Two caveats that are real but narrow. Re-export does not preserve monkeypatch targets:
     `monkeypatch.setattr("promptstrings.core._render_static", ...)` no longer affects
     rendering, because the library resolves that name in `promptstrings.templates`. And
@@ -31,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unsupported yield type. The capability was never available; only the message changes.
 
 ### Added
+- `provenance_from_file(path, *, source_id=None, version=None, provider_name=None)` (ADR 0012
+  D4) — derives a `PromptSourceProvenance` from a template file: the path as identity and a
+  `sha256:`-prefixed hash of its raw bytes. Provenance is carried only by prompts returning a
+  `PromptSource`, which is also where the template tends to live in a file, so this removes the
+  hand-written boilerplate that was causing provenance to be dropped.
+  - `source_id` defaults to the given path in POSIX form and is never resolved to an absolute
+    path; pass it explicitly when locating templates from `__file__`, so the recorded identity
+    stays repository-relative rather than machine-specific.
+  - The hash is byte-exact with no newline normalisation, so a CRLF checkout hashes
+    differently — normalising would hide a real difference in what was sent to the model.
+  - `version` is never assigned by the library.
 - README section "Three kinds of prompt, three sets of guarantees" and
   `examples/13_prompt_classes.py`, documenting that a docstring, a `-> Template` return, and a
   `-> PromptSource` return carry different guarantees (ADR 0012 D2). Two consequences are

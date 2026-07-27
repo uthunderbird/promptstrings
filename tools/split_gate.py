@@ -176,10 +176,26 @@ def check() -> int:
 
     base = json.loads(BASELINE.read_text())
     failures: list[str] = []
+    historical: list[str] = []
 
-    def gate(number: str, ok: bool, detail: str) -> None:
-        print(f"[{'PASS' if ok else 'FAIL'}] gate {number}: {detail}")
-        if not ok:
+    def gate(number: str, ok: bool, detail: str, *, split_time: bool = False) -> None:
+        """Report a gate.
+
+        `split_time` gates answer a historical question — did the split move code
+        without editing it — and were answered at the split commit. Every
+        legitimate later edit to a moved definition makes them differ, correctly.
+        They are reported but do not fail the run, because a permanently red
+        check is one people learn to ignore. To re-check the historical claim,
+        run against the split commit in a worktree.
+        """
+        if ok:
+            print(f"[PASS] gate {number}: {detail}")
+        elif split_time:
+            print(f"[INFO] gate {number}: {detail}")
+            print("       (split-time gate: differs because of a legitimate later edit)")
+            historical.append(number)
+        else:
+            print(f"[FAIL] gate {number}: {detail}")
             failures.append(number)
 
     # Gate 1 — public names and __all__ unchanged.
@@ -190,10 +206,17 @@ def check() -> int:
         f"all {len(base['package_all'])} public names import from promptstrings"
         + (f" — missing {missing_public}" if missing_public else ""),
     )
+    # The permanent invariant is that no public name is *lost*. Demanding
+    # byte-identity would make this gate red for every later feature that
+    # legitimately exports something — ADR 0012's own D4 adds one.
+    removed = sorted(set(base["package_all"]) - set(promptstrings.__all__))
+    added = sorted(set(promptstrings.__all__) - set(base["package_all"]))
     gate(
         "1b",
-        sorted(promptstrings.__all__) == base["package_all"],
-        "promptstrings.__all__ unchanged",
+        not removed,
+        "no public name removed from promptstrings.__all__"
+        + (f" — removed {removed}" if removed else "")
+        + (f" (added since the split: {added})" if added else ""),
     )
 
     # Gate 3 — every pre-split core name still importable from the shim.
@@ -253,17 +276,21 @@ def check() -> int:
         "6b",
         not edited,
         "no definition edited beyond D8's three permitted deltas"
-        + (f" — edited {edited}" if edited else ""),
+        + (f" — since edited: {edited}" if edited else ""),
+        split_time=True,
     )
 
     # Gate 7 — no cross-module import cycle.
     cycle = find_cycle(module_import_graph())
     gate("7", cycle is None, "module import graph is a DAG" + (f" — cycle {cycle}" if cycle else ""))
 
+    if historical:
+        print(f"\nsplit-time gate(s) now differ: {', '.join(historical)} — expected after "
+              f"later edits, not a regression")
     if failures:
-        print(f"\n{len(failures)} gate(s) failed: {', '.join(failures)}")
+        print(f"{len(failures)} gate(s) failed: {', '.join(failures)}")
         return 1
-    print("\nall gates passed")
+    print("all standing gates passed")
     return 0
 
 

@@ -34,6 +34,7 @@ from promptstrings import (
     Role,
     promptstring,
     promptstring_generator,
+    provenance_from_file,
 )
 from promptstrings.integrations.dishka import From as _dishka_From
 
@@ -1877,3 +1878,110 @@ def test_composition_di_in_both_prompts() -> None:
 
     result = asyncio.run(run())
     assert result == "System: Expert on Python.\nQuestion: What is asyncio?"
+
+
+# ---------------------------------------------------------------------------
+# ADR 0012 D4 — provenance_from_file
+# ---------------------------------------------------------------------------
+
+
+def test_provenance_from_file_hashes_raw_bytes(tmp_path) -> None:
+    """hash is sha256 over the file's bytes, with the algorithm named in the value."""
+    import hashlib
+
+    f = tmp_path / "system.jinja2"
+    f.write_bytes(b"You are an expert on {{ topic }}.")
+
+    prov = provenance_from_file(f)
+
+    expected = hashlib.sha256(b"You are an expert on {{ topic }}.").hexdigest()
+    assert prov.hash == f"sha256:{expected}"
+
+
+def test_provenance_from_file_hash_is_byte_exact(tmp_path) -> None:
+    """Newlines are NOT normalised: a CRLF checkout is a different prompt."""
+    lf = tmp_path / "lf.txt"
+    lf.write_bytes(b"line one\nline two\n")
+    crlf = tmp_path / "crlf.txt"
+    crlf.write_bytes(b"line one\r\nline two\r\n")
+
+    assert provenance_from_file(lf).hash != provenance_from_file(crlf).hash
+
+
+def test_provenance_from_file_source_id_is_posix(tmp_path, monkeypatch) -> None:
+    """source_id uses forward slashes so the same template compares equal everywhere.
+
+    str(WindowsPath('prompts/x.jinja2')) would be 'prompts\\x.jinja2', giving the
+    same file in the same repository a different source_id per developer.
+    """
+    import pathlib as _pathlib
+
+    f = tmp_path / "sub" / "system.jinja2"
+    f.parent.mkdir()
+    f.write_text("hello")
+
+    prov = provenance_from_file(f)
+    assert "\\" not in prov.source_id
+    assert prov.source_id.endswith("sub/system.jinja2")
+    assert prov.source_id == _pathlib.PurePath(f).as_posix()
+
+
+def test_provenance_from_file_does_not_resolve_the_path(tmp_path, monkeypatch) -> None:
+    """The path is recorded as given: an absolute path is machine-specific."""
+    f = tmp_path / "system.jinja2"
+    f.write_text("hello")
+    monkeypatch.chdir(tmp_path)
+
+    prov = provenance_from_file("system.jinja2")
+    assert prov.source_id == "system.jinja2"
+
+
+def test_provenance_from_file_version_is_the_callers(tmp_path) -> None:
+    """The library assigns no version; it passes through the caller's."""
+    f = tmp_path / "system.jinja2"
+    f.write_text("hello")
+
+    assert provenance_from_file(f).version is None
+    assert provenance_from_file(f, version="2026-07-27").version == "2026-07-27"
+    assert provenance_from_file(f, provider_name="local").provider_name == "local"
+
+
+def test_provenance_from_file_flows_to_rendered_messages(tmp_path) -> None:
+    """The point of the helper: provenance reaches the message, not just the object."""
+    f = tmp_path / "system.jinja2"
+    f.write_text("You are helpful.")
+
+    @promptstring(strict=False)
+    def delegated() -> PromptSource:
+        return PromptSource(
+            content=f.read_text(),
+            provenance=provenance_from_file(f, version="v1"),
+        )
+
+    messages = asyncio.run(delegated.render_messages(PromptContext()))
+    assert messages[0].source is not None
+    assert messages[0].source.version == "v1"
+    assert messages[0].source.hash.startswith("sha256:")
+
+
+def test_provenance_from_file_missing_file_raises_oserror(tmp_path) -> None:
+    """A missing template is an OSError, not a silently empty provenance."""
+    with pytest.raises(FileNotFoundError):
+        provenance_from_file(tmp_path / "nope.jinja2")
+
+
+def test_provenance_from_file_source_id_override(tmp_path) -> None:
+    """An explicit source_id records a stable identity while reading elsewhere.
+
+    Code that finds templates relative to __file__ holds an absolute path, which
+    is as machine-specific as a backslash separator. The override lets the
+    recorded identity be repository-relative while the read stays absolute.
+    """
+    f = tmp_path / "system.jinja2"
+    f.write_text("hello")
+
+    prov = provenance_from_file(f, source_id="prompts/system.jinja2")
+
+    assert prov.source_id == "prompts/system.jinja2"
+    assert str(tmp_path) not in prov.source_id
+    assert prov.hash == provenance_from_file(f).hash  # same file, same hash

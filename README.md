@@ -310,6 +310,34 @@ def system_prompt(topic: str):
     )
 ```
 
+When the template lives in a file, `provenance_from_file` derives the identity
+and a content hash for you, so the boilerplate above does not have to be repeated
+per prompt:
+
+```python
+from promptstrings import promptstring, PromptSource, provenance_from_file
+
+HERE = pathlib.Path(__file__).parent
+
+@promptstring(strict=False)
+def system_prompt(topic: str) -> PromptSource:
+    template = HERE / "prompts" / "system.jinja2"
+    return PromptSource(
+        content=render_however_you_like(template, topic=topic),
+        provenance=provenance_from_file(
+            template,
+            source_id="prompts/system.jinja2",  # keep the identity repo-relative
+            version="2026-07-27",
+        ),
+    )
+```
+
+`hash` is `sha256` over the file's raw bytes, with no newline normalisation —
+normalising would hide a real difference in what was sent to the model. `version`
+is never assigned by the library. Pass `source_id` explicitly whenever the path
+you read from is absolute, since an absolute path is machine-specific and would
+make the same template compare unequal across checkouts.
+
 For a static template with provenance, use `PromptSource` with literal content:
 
 ```python

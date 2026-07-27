@@ -23,6 +23,7 @@ not care which, because it never looks at the result.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 from dataclasses import dataclass
 from string.templatelib import Template
 
@@ -30,10 +31,10 @@ from promptstrings import (
     PromptContext,
     PromptRenderError,
     PromptSource,
-    PromptSourceProvenance,
     PromptStrictnessError,
     parse_trusted_template,
     promptstring,
+    provenance_from_file,
 )
 
 
@@ -64,17 +65,25 @@ def owned_dynamic(topic: str) -> Template:
 
 # --- 3. Delegated: you render, the library carries provenance ----------------
 
+TEMPLATE_FILE = pathlib.Path(__file__).with_name("_expert_template.txt")
+
+
 @promptstring(strict=False)
 def delegated(topic: str) -> PromptSource:
     # A real deployment renders with Jinja2 or a vendor SDK here. The library
     # never re-parses whatever comes back.
-    text = f"You are an expert on {topic}."
+    text = TEMPLATE_FILE.read_text().format(topic=topic)
     return PromptSource(
         content=text,
-        provenance=PromptSourceProvenance(
-            source_id="prompts/expert.jinja2",
+        # provenance_from_file records an identity and a sha256 of the file's
+        # bytes, so a rendered message traces back to the exact template that
+        # produced it. source_id is passed explicitly because TEMPLATE_FILE is
+        # absolute — an absolute path is machine-specific and would make the
+        # same template compare unequal across checkouts. `version` is yours.
+        provenance=provenance_from_file(
+            TEMPLATE_FILE,
+            source_id="examples/_expert_template.txt",
             version="2026-07-27",
-            hash="sha256:2c1a…",
         ),
     )
 

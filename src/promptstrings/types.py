@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import os
+import pathlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -86,6 +89,59 @@ class PromptSourceProvenance:
         if self.provider_name is not None:
             metadata["provider_name"] = self.provider_name
         return metadata
+
+
+def provenance_from_file(
+    path: str | os.PathLike[str],
+    *,
+    source_id: str | None = None,
+    version: str | None = None,
+    provider_name: str | None = None,
+) -> PromptSourceProvenance:
+    """Derive provenance from a template file on disk (ADR 0012 D4).
+
+    Provenance is carried only by prompts that return a ``PromptSource`` — the
+    path taken when an external engine renders the text. That is also the path
+    where the template lives in a file, so without this helper every such prompt
+    needs a hand-written ``PromptSourceProvenance`` and most lose provenance
+    instead.
+
+    ``source_id`` defaults to the given path in POSIX form, **not** resolved to
+    an absolute path. ``str(path)`` would yield backslash separators on Windows,
+    so the same template in the same repository would carry different provenance
+    on different machines, defeating the only property this helper provides.
+
+    That default only works if the caller passes a stable, relative path. Code
+    that locates its templates from ``__file__`` necessarily has an absolute
+    path, which is equally machine-specific — so pass ``source_id`` explicitly
+    to record a repository-relative identity while reading from wherever the
+    file actually is::
+
+        provenance_from_file(
+            HERE / "prompts" / "system.jinja2",
+            source_id="prompts/system.jinja2",
+        )
+
+    ``hash`` is ``sha256`` over the file's raw bytes, with no newline
+    normalisation: normalising would hide a real difference in what was sent to
+    the model. A repository checked out with ``core.autocrlf=true`` therefore
+    hashes differently from the same commit on Linux.
+
+    ``version`` is yours — the library assigns none. Pass a git SHA, a registry
+    version, a date, or nothing.
+
+    The path is caller-supplied and caller-trusted: this function does not
+    validate it, reads the file whole in order to hash it, and follows symlinks.
+    Call it at decoration or start-up time, not per render.
+    """
+    digest = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+    return PromptSourceProvenance(
+        source_id=source_id if source_id is not None else pathlib.PurePath(path).as_posix(),
+        version=version,
+        hash=f"sha256:{digest}",
+        provider_name=provider_name,
+    )
+
 
 @dataclass(frozen=True)
 class PromptSource:

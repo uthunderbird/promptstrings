@@ -22,6 +22,7 @@ from .types import (
     PromptSourceProvenance,
     Promptstring,
     Role,
+    provenance_from_file,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "parse_trusted_template",
     "promptstring",
     "promptstring_generator",
+    "provenance_from_file",
 ]
