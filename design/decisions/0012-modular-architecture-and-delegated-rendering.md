@@ -4,9 +4,9 @@
 - **Date:** 2026-07-27
 - **Target version:** 1.4.0 (module split), seams as noted per decision
 - **Deciders:** Daniyar Supiyev
-- **Supersedes:** partially revises ADR 0002 non-promises (see "Revisions to ADR 0002")
+- **Supersedes:** retires ADR 0002 non-promise N-5; conditionally amends ADR 0002 Promise I-2 (held, see D5). Full table in "Revisions to ADR 0002"
 - **Superseded by:** —
-- **Method:** Swarm Mode design session. Named experts: Armin Ronacher (Jinja2/Flask, evangelist/analogist), Hynek Schlawack (API minimalism, devil's advocate), Brett Cannon (packaging/SemVer, completer-finisher), Raymond Hettinger (Python idiom, reframer), Charity Majors (observability, implementer). Findings F4–F6 are tool-grounded; see "Grounding".
+- **Method:** Swarm Mode design session. Named experts: Armin Ronacher (Jinja2/Flask, evangelist/analogist), Hynek Schlawack (API minimalism, devil's advocate), Brett Cannon (packaging/SemVer, completer-finisher), Raymond Hettinger (Python idiom, reframer), Charity Majors (observability, implementer). Findings F4–F12 are tool-grounded; see "Grounding". Hardened by four independent cold adversarial reviews; see "Notes".
 
 ## Context
 
@@ -27,12 +27,13 @@ Phoenix/Langfuse for prompt observability, the same tools for prompt management,
 OpenTelemetry spans inside prompt generators, and interop with LLM frameworks
 (pydantic-ai, OpenAI, openai-agents).
 
-ADR 0002 had already rejected four of these seams (N-1 no OTel in core, N-3 no
-`DependencyResolver`, N-4 no `TemplateLoader`, N-7 no plugin registry) under a
-single rationale: **lock-too-early** — do not fix a call shape before real
-consumers exist. This ADR revisits those rejections with the consumers now
-identified, and finds that the rationale mostly still holds, for a reason ADR
-0002 did not anticipate.
+ADR 0002 had already rejected four of these seams: N-1 (no OTel in core), N-3 (no
+`DependencyResolver`), N-4 (no `TemplateLoader`), N-7 (no plugin registry). Their
+rationales differ — N-3 and N-4 rest on **lock-too-early** (do not fix a call
+shape before real consumers exist), N-1 on vendor-neutrality and the
+adapter-package model, and N-7 is stated without one. This ADR revisits all four
+with the consumers now identified, and finds each still standing — two of them (N-1, N-4) for reasons
+ADR 0002 did not anticipate, and two (N-3, N-7) for their original ones.
 
 **Owner constraints locked before this design iterated:**
 - The 1.0 contract is not sacred; a 2.0 with breaking changes is permitted if the
@@ -44,7 +45,7 @@ identified, and finds that the rationale mostly still holds, for a reason ADR
 
 ### D1 — The diagnosis is missing module boundaries, not classless functions
 
-The request framed the fifteen module-level functions as a design smell —
+The request framed the module-level functions as a design smell —
 functions that belong to no class. That framing is rejected for Python.
 
 Module-level functions are idiomatic (`itertools`, `os.path`, `json` are
@@ -210,13 +211,33 @@ is silently lost exactly where external templates make it most valuable.
 Add a helper that derives provenance from a template file:
 
 ```python
-def provenance_from_file(path: str | os.PathLike, *, provider_name: str | None = None)
-    -> PromptSourceProvenance: ...
+def provenance_from_file(
+    path: str | os.PathLike[str],
+    *,
+    version: str | None = None,
+    provider_name: str | None = None,
+) -> PromptSourceProvenance: ...
 ```
 
-`source_id` is the path, `hash` is a content hash, `version` is left to the
-caller. Pure stdlib; no template engine is imported. This is a convenience over
-the existing type, not a new seam.
+- `source_id` is `str(path)` as given — not resolved to an absolute path, since an
+  absolute path is machine-specific and provenance must be comparable across
+  machines.
+- `hash` is `"sha256:" + sha256(file_bytes).hexdigest()`, over the **raw bytes**
+  with no newline normalisation. Fixing the algorithm and the encoding is the
+  point: a provenance hash that differs between machines is not provenance. The
+  `sha256:` prefix matches the format already used in the ADR 0007 examples.
+- `version` is a parameter, not something the caller patches in afterwards. An
+  earlier draft omitted it and told the caller to supply `version` separately,
+  which would have meant a `dataclasses.replace()` at every call site — exactly
+  the by-hand work this helper exists to remove.
+
+Pure stdlib (`hashlib`, `pathlib`); no template engine is imported. **Home
+module:** `types.py`, beside `PromptSourceProvenance` which it constructs. It is
+the only file-reading code in the package, which is worth noting in review; if a
+second such helper ever appears, they belong together elsewhere.
+
+This is a convenience over an existing type, not a new seam — but it *is* new
+public surface, counted in D5a.
 
 ### D5 — `PromptSource` gains an opaque `handle` for vendor trace linkage
 
@@ -310,7 +331,7 @@ If D5 is deferred as recommended, this ADR's entire net public surface change is
 
 ### D6 — OpenTelemetry needs no change; N-1 stands
 
-Requested seam 3 — spans inside a prompt generator — **already works**, and this
+Requested seam 4 — spans inside a prompt generator — **already works**, and this
 was verified rather than assumed.
 
 The library resolves concurrent async dependencies with
@@ -344,7 +365,7 @@ callbacks* fire; it does not restrict span nesting, which rides on contextvars.
 
 ### D7 — LLM-framework interop needs no adapters
 
-Requested seam 4 needs no library change, but "requires nothing" was too strong.
+Requested seam 5 needs no library change, but "requires nothing" was too strong.
 
 pydantic-ai's extension point is a function returning `str`
 (`@agent.system_prompt def f(ctx) -> str`). Its `ctx` is a `RunContext`, not a
@@ -447,7 +468,8 @@ Rejected alternatives:
 
 Nine modules. With the cycle broken by D8, the module graph is acyclic.
 
-This table is a **complete assignment of all 43 top-level bindings**, not a prose
+This table is a **complete assignment of all 43 existing top-level bindings**,
+plus the one new `_PromptObject` marker (44 rows) — not a prose
 summary — an executor should not have to re-derive where anything goes. Line
 figures are measured definition bodies and exclude each module's imports and
 docstring, which is why they sum to less than 1,401.
@@ -458,7 +480,7 @@ docstring, which is why they sum to less than 1,401.
 | `types.py` | Public data types, the `Promptstring` Protocol, and the private `_PromptObject` marker. | `_PromptObject` (new), `Promptstring`, `PromptMessage`, `Role`, `PromptSourceProvenance`, `PromptSource`, `PromptContext`, `Resolver`, `PromptDepends`, `AwaitPromptDepends` | 104 |
 | `observability.py` | The `Observer` Protocol, its three events, the no-op default, and exception-swallowing dispatch. | `RenderStartEvent`, `RenderEndEvent`, `RenderErrorEvent`, `Observer`, `_NoOpObserver`, `_observer_logger`, `_fire_observer` | 89 |
 | `introspection.py` | Reading a decorated function's signature, type hints, and `Annotated` markers. | `_INTERNAL_RETURN_TYPES`, `_get_param_type_hints`, `_annotated_markers`, `_response_schema_from_hints`, `_has_dynamic_return_annotation` | 92 |
-| `templates.py` | The owned-prompt grammar: parsing, placeholder extraction, compilation, and the two render functions. | `_MISSING`, `_parse_docstring`, `parse_trusted_template`, `_placeholders_from_template`, `_is_unrendered_prompt`, `_render_static`, `_render_dynamic`, `_compile_at_decoration` | 116 |
+| `templates.py` | The owned-prompt grammar: parsing, placeholder extraction, compilation, and the two render functions. | `_MISSING`, `_parse_docstring`, `parse_trusted_template`, `_placeholders_from_template`, `_is_unrendered_prompt`, `_render_static`, `_render_dynamic`, `_compile_at_decoration` | 157 |
 | `resolution.py` | Resolving declared parameters from a `PromptContext`, including concurrent async resolvers. | `_maybe_await`, `_resolve_dependencies` | 87 |
 | `prompts.py` | The single-message prompt engine (`_PromptString`). | `_PromptString` | 243 |
 | `generators.py` | The multi-message generator engine (`_PromptStringGenerator`). | `_strict_heuristic_logger`, `_PromptStringGenerator` | 213 |
@@ -475,8 +497,8 @@ ambiguous ones:
 - **`_MISSING` → `templates.py`.** It is an identity sentinel, so placement is a
   correctness decision, not formatting: `_parse_docstring` constructs it and
   `_PromptString` tests `i.value is _MISSING` to detect `parse_trusted_template`
-  output. One definition site, imported by `prompts.py`; the edge runs upward from
-  templates to prompts, which is the allowed direction.
+  output. One definition site, imported by `prompts.py`; the edge is `prompts →
+  templates`, downward, which is the allowed direction.
 
 Dependency layers, top depending only on those below it:
 
@@ -509,7 +531,7 @@ share the mechanism.
 
 The surviving reasons are weaker and are stated as such:
 
-1. They are 243 and 213 lines and have no call edge between them — the only two
+1. The engine classes are 243 and 212 lines and have no call edge between them — the only two
    symbols of that size in the file that are mutually independent.
 2. Their *yield contracts* genuinely differ: one produces a single string from one
    template; the other consumes a stream of `Role` / `PromptMessage` / `str` /
@@ -521,7 +543,7 @@ This is the weakest boundary in the table. Merging them into one ~460-line
 `prompts.py` is a defensible alternative and would not violate any layer rule.
 
 **Recorded objection (Schlawack, not resolved in this ADR's favour):** four of
-nine modules are under 100 lines, and `factory.py` at 72 lines holding four
+nine modules are under 100 lines, and `factory.py` at 71 lines holding four
 definitions is a file a reader opens once and never again. The criterion applied
 here is not size but *whether the module has a reason to change independently of
 its neighbour* — `factory` does, since the configuration carrier changes when
@@ -586,33 +608,46 @@ cannot be loaded by 1.0.0–1.3.0. For mixed-version workers this is a genuine
 wire-format change. The precise claim is therefore: **no source-level break;
 pickle payload module paths change.**
 
-**Acceptance gates for the split** — it is done only when all of these hold:
+**Acceptance gates for the split.** Gates 5–7 compare against a **baseline that
+must be captured before any file is touched** (see Execution, step 0); after the
+split, `core.py` no longer holds the definitions to compare with. Each gate names
+one property and can fail on its own.
 
-1. `from promptstrings import X` succeeds for all 21 public names, and
-   `promptstrings.__all__` is unchanged (that is the package's `__all__`; the new
-   `promptstrings.core.__all__` is a separate, newly-added list of 43 names).
-2. `import promptstrings` raises no `ImportError` — the layer graph is only
-   validated at import time (Cannon's risk in D8a).
-3. `from promptstrings.core import X` works for **all 43** pre-split top-level
-   names.
-4. The full gate is green: tests, mypy, ruff, all twelve examples, a built wheel
-   installed into a clean virtualenv.
-5. An import-surface equivalence check passes: the set of names reachable from
-   `promptstrings` and from `promptstrings.core` after the split equals the set
-   captured from the pre-split commit. This must be a **committed script in the
-   repository**, not an ad-hoc one — an earlier draft of this gate referred to a
-   verification script that existed only in a scratch directory, which is not a
-   gate at all.
-6. No module's public behaviour changes: the split moves code, it does not edit
-   logic. **Detection mechanism**, since the existing suite tests through the
-   public API and cannot by itself distinguish "moved" from "moved and subtly
-   edited": each moved definition's source text must be byte-identical to its
-   pre-split source, checked mechanically by extracting both with `ast` and
-   comparing. Any definition that must change is a separate commit with its own
-   justification.
-7. The dependency-graph analysis that produced F7 is re-run against the split
-   package and reports no cycle **across modules** — the layering is a claim about
-   the design, and after the split it becomes a checkable property of the code.
+| # | Gate | Mechanism |
+|---|---|---|
+| 1 | All 21 public names import from `promptstrings`, and `promptstrings.__all__` is unchanged | compare against the baseline `__all__` |
+| 2 | `import promptstrings` raises no `ImportError` | plain import in a fresh interpreter |
+| 3 | All **43** pre-split names import from `promptstrings.core` | iterate the baseline name list |
+| 4a | Tests pass | `make test` |
+| 4b | Types clean | `make typecheck` |
+| 4c | Lint clean | `make lint` |
+| 4d | All twelve examples run | the loop CI already uses |
+| 4e | A built wheel installs and imports in a clean virtualenv | `uv build`, then `uv venv` + `uv pip install <wheel>` + import check |
+| 5 | Import-surface equivalence: names reachable from `promptstrings` and `promptstrings.core` equal the baseline sets | committed script |
+| 6 | The split moves code, it does not edit logic | AST source-text comparison, with the three exceptions below |
+| 7 | No cross-module cycle | committed script |
+
+**Gates 5, 6 and 7 require committed scripts, not ad-hoc ones.** An earlier draft
+named a verification script that existed only in a scratch directory, which is not
+a gate. Concretely: one script captures the baseline and checks gates 1/3/5,
+another does the AST comparison for gate 6, and gate 7 is the F7 dependency
+analysis generalised from symbols to modules — it must report the module-level
+import graph and assert it is a DAG. Gate 7 is not redundant with gate 2: a
+successful import proves no *runtime* cycle, while a layering violation can import
+fine and still be a violation.
+
+**Gate 6's three permitted deltas.** Byte-identity cannot hold universally,
+because the cycle fix in D8 *is* an edit to three definitions. The exception list
+is exactly:
+
+1. `_is_unrendered_prompt` — body becomes `isinstance(value, _PromptObject)`.
+2. `class _PromptString` — gains `_PromptObject` as a base.
+3. `class _PromptStringGenerator` — gains `_PromptObject` as a base.
+
+Plus, mechanically and for every moved definition: `import` statements change,
+since each module imports what it uses. Gate 6 therefore compares **definition
+bodies excluding the module preamble**, and asserts that the only body deltas are
+the three above. Any fourth delta fails the gate and belongs in its own commit.
 
 **This decouples the two halves of the request.** D8/D8a/D9 (the split) can be
 executed immediately at zero compatibility cost. D5 (the `handle` field) is
@@ -641,6 +676,49 @@ So the rule is preserved in substance: Protocols for anything users implement,
 nominal types only for identity the library asserts about its own objects.
 `_PromptObject` is private, documented as not-for-subclassing, carries no
 methods, and adds no public attributes.
+
+## Execution
+
+Everything an engineer needs to perform the split is D8 (the marker), D8a (the
+module table), and D9 (the shim and the gates). This section is the order to do
+it in; the rest of the ADR is the reasoning behind it and is not required reading
+to execute.
+
+**Step 0 — capture the baseline. Before touching any file.**
+Gates 1, 3, 5 and 6 all compare against pre-split state that stops existing once
+the split begins. Commit a script that records, from the current `core.py`:
+the 43 top-level binding names, `promptstrings.__all__`, the set of names
+reachable from `promptstrings` and `promptstrings.core`, and each definition's
+source text keyed by name. `git show` can recover this later, but a committed
+baseline makes the gates runnable by anyone, not just in this working tree.
+
+**Step 1 — create the nine modules per the D8a table.** Move definitions
+unchanged. Add `_PromptObject` to `types.py`, apply D8's three permitted deltas,
+and nothing else.
+
+**Step 2 — make `core.py` the shim.** Re-export all 43 names with an explicit
+`__all__` (required by `mypy strict` / `no_implicit_reexport` and by `ruff` F401).
+
+**Step 3 — leave `promptstrings/__init__.py` alone except for its import source.**
+Its `__all__` does not change; only the modules it imports from.
+
+**Step 4 — run all seven gates.** Any failure stops the split rather than being
+patched around.
+
+Steps 0–4 are the whole split, and they change no behaviour. The following are
+**separate** pieces of work with their own commits, deliberately not bundled:
+
+**Step 5 — add `provenance_from_file` (D4)** to `types.py`, extending
+`promptstrings.__all__` to 22 names and the shim's list to 44. Note that this
+means gate 1 ("`__all__` unchanged") is scoped to steps 0–4; it is intentionally
+violated here, by a change with its own justification.
+
+**Step 6 — document the owned/delegated distinction (D2)** in the README and as a
+new example, including the asymmetry table.
+
+**Not scheduled:** D5 (`handle`) is held pending the owner decision, and
+delegation for the generator engine is a feature with its own design questions.
+Neither belongs in the split.
 
 ## Revisions to ADR 0002
 
@@ -690,9 +768,9 @@ Two clarifications an earlier draft got wrong:
 
 - **Three or four larger modules instead of nine** — considered seriously
   (Schlawack). Rejected because the boundary test is one-sentence responsibility,
-  not file count; recorded as an open objection in D8.
+  not file count; recorded as an open objection in D8a.
 
-- **Converting the fifteen module functions into classes** — rejected (D1).
+- **Converting the module-level functions into classes** — rejected (D1).
   Un-idiomatic for Python and would worsen the documentation problem it aims to
   fix.
 
@@ -702,16 +780,20 @@ Two clarifications an earlier draft got wrong:
 - Every module has a one-sentence responsibility, which is the documentation
   precondition the request was actually about.
 - The split ships with zero breaking changes and does not consume the 2.0 budget.
-- Four of five requested integrations are available today with no library change;
-  users are not blocked waiting on adapter work.
+- Four of five requested integrations need no new Protocol or type; three of them
+  work today with no library change at all, and the fourth costs one helper
+  function. Users are not blocked waiting on adapter work.
 - Naming the owned/delegated distinction converts a hidden inconsistency into a
   stated contract.
 
 **Negative:**
 - Nine modules is more navigation surface than one file; the benefit is
   conditional on the responsibilities staying single-sentence.
-- `handle: Any` is untyped by design and can become a dumping ground if the
-  documented discipline is not enforced in review.
+- If D5 ships, `handle: Any` is untyped by design and can become a dumping
+  ground if the documented discipline is not enforced in review. Note also that
+  `repr=False` protects the library's own repr, not a third-party observer that
+  runs `asdict()` on the event and ships it to a vendor — the discipline is a
+  convention at that boundary, not a mechanism.
 - The library still cannot show where render time goes internally (D6 residual).
 - Monkeypatch targets under `promptstrings.core` silently stop working (D9); no
   gate detects this.
@@ -721,12 +803,8 @@ Two clarifications an earlier draft got wrong:
   named, neither is fixed here.
 
 **Neutral:**
-- Work order: (1) split per D8/D8a — `promptstrings/__init__.py` keeps its current
-  `__all__` and simply imports from the new modules, `core.py` becomes the 43-name
-  shim; (2) verify all seven acceptance gates in D9; (3) add `provenance_from_file`
-  (D4); (4) document the owned/delegated distinction in README and a new example.
-  Steps 1–2 are independent of 3–4, and D5 is not in this work order because it is
-  held.
+- Work order: see the "Execution" section, which is the executor-facing summary
+  of D8, D8a and D9.
 - Follow-on ADRs anticipated: a Langfuse adapter contract (which is what would
   settle D5 by building the linkage before adding the field), delegation for the
   generator engine, and — only if a consumer appears — internal-phase spans.
@@ -783,7 +861,7 @@ Reframer slot was required by a contested diagnosis, so no independent Synthesiz
 was seated — synthesis was carried by the Moderator. Same-session synthesis is
 weaker than an independent pass.
 
-The seam results (D3–D7) rest on F4–F6 and F10–F11; the decomposition (D8–D8a)
+The seam results (D2–D7) rest on F4–F6 and F10–F11; the decomposition (D8–D8a)
 rests on F7–F9 and F12. All are tool-grounded and independently re-checkable, and
 re-running the F7 analysis against the split package is acceptance gate 7.
 
