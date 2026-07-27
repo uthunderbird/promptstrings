@@ -65,7 +65,9 @@ between them**:
 | Dependency resolution | `_resolve_dependencies`, `_maybe_await` | 2 |
 | Observability plumbing | `_fire_observer` | 1 |
 
-`_compile_at_decoration` is the one function that straddles two of these groups:
+`_compile_at_decoration` is the function that most sharply straddles two of these
+groups (`_resolve_dependencies` also reaches across, calling `_annotated_markers`,
+but its home is not in doubt):
 it calls `_has_dynamic_return_annotation` (introspection) *and* `_parse_docstring`
 (templates). It is assigned to the template group because its **output** is a
 compiled `Template` and its failure mode is `PromptCompileError` — it consumes
@@ -77,29 +79,53 @@ The remedy is module boundaries, not class membership. Everything below follows
 from that correction: if the OO justification were kept, it would pull in classes
 the design does not need.
 
-### D2 — Two classes of prompt: owned and delegated
+### D2 — Three classes of prompt: owned-static, owned-dynamic, delegated
 
-This distinction already exists in the implementation but has never been named,
-and naming it is the load-bearing move of this ADR.
+These distinctions already exist in the implementation but have never been named,
+and naming them is the load-bearing move of this ADR.
 
-**Owned prompts** — a docstring or t-string, parsed under the `{identifier}`
-grammar of ADR 0005. Placeholders are known at decoration time, so `placeholders`
-is populated and strict mode can reject missing and unused parameters *before*
-any model call. This is the library's differentiator (VISION problem 1, design
-property "static introspection").
+**Owned-static prompts** — a docstring, parsed at decoration time under the
+`{identifier}` grammar of ADR 0005. Placeholders are known before any render, so
+`placeholders` is populated and strict mode can reject missing and unused
+parameters *before* any model call. This is the library's differentiator (VISION
+problem 1, design property "static introspection").
 
-**Delegated prompts** — the decorated function produces the text itself and
-returns it. The library never parses it (ADR 0006 D1: `PromptSource` is a literal
-passthrough). `placeholders` is necessarily empty, and strict mode over
-placeholders is impossible in principle, not merely unimplemented.
+**Owned-dynamic prompts** — the function returns a `Template`, either a t-string
+or the output of the public `parse_trusted_template`. The library still renders
+this itself and still enforces strict mode, but at render time rather than
+decoration time, so `placeholders` is empty while missing-parameter and
+unused-parameter checks both still fire. Provenance is `None` on this path.
+
+**Delegated prompts** — the function returns a `PromptSource`. The library never
+parses it (ADR 0006 D1: literal passthrough). `placeholders` is necessarily empty,
+strict mode over placeholders is impossible in principle rather than merely
+unimplemented, and this is the only path that carries provenance.
+
+**Three classes, not two.** An earlier draft of this ADR called the distinction
+two-way and treated `-> Template` as delegated. That was wrong:
+`_has_dynamic_return_annotation` routes on `PromptSource` **or** `Template`, and
+the two branches behave differently in exactly the properties this ADR is about.
+The middle class matters because `parse_trusted_template` is public and is the
+natural landing point for a prompt loaded from a database or a prompt-management
+system — precisely the case D5 and ADR 0002's N-4 discuss.
+
+A fourth shape does *not* exist: a docstring-less function annotated `-> str`
+routes nowhere and raises `PromptCompileError` at decoration.
 
 ```python
-# Owned — strict, introspectable
+# Owned-static — strict before render, introspectable at decoration
 @promptstring
 def greet(name: str) -> str:
     """Hello {name}"""
 
 greet.placeholders            # frozenset({'name'})
+
+# Owned-dynamic — library still renders and still strict-checks, at render time
+@promptstring
+def from_store(name: str) -> Template:
+    return parse_trusted_template(load_from_db("greeting"))
+
+from_store.placeholders       # frozenset() — not known until render
 
 # Delegated — the function renders; the library types, injects, and observes
 _env = jinja2.Environment(loader=jinja2.FileSystemLoader("prompts"))
@@ -120,13 +146,13 @@ failing `mypy` against the `-> PromptSource` annotation that
 delegated path at all. Wrapping in `PromptSource` is not decoration: it is what
 makes the annotation true *and* what gives provenance somewhere to live (D4).
 
-**The two classes MUST be documented as carrying different guarantees.** The
+**The three classes MUST be documented as carrying different guarantees.** The
 predictable failure is a user writing a delegated prompt and expecting strict
 checks that cannot exist there. The distinction is not a limitation to hide; it
 is the contract.
 
 Most of what the library offers besides rendering — typed parameters, dependency
-injection, observer events, error legibility — applies to both classes. That is
+injection, observer events, error legibility — applies to all three classes. That is
 what "typed stub" means concretely: the library is a typed, DI-aware, observable
 wrapper around prompt text, and rendering is one pluggable part of it rather than
 its centre.
@@ -135,12 +161,31 @@ its centre.
 directions.** An earlier draft of this ADR claimed they did apply identically;
 that was false, and the exceptions are structural rather than incidental:
 
-| Capability | Owned | Delegated | Why |
+| Capability | Owned-static (docstring) | Owned-dynamic (`-> Template`) | Delegated (`-> PromptSource`) |
 |---|---|---|---|
-| `placeholders` / strict mode | yes | **no** | the text is never parsed |
-| `response_schema` | yes | **no** | `_response_schema_from_hints` returns `None` for `str`, `Template`, and `PromptSource` — exactly the return annotations that route a function to the delegated path |
-| provenance | **no** | yes | the static render path sets `provenance = None` unconditionally; only a returned `PromptSource` carries it |
-| available on `@promptstring_generator` | yes | **no** | see below |
+| `placeholders` at decoration | **yes** | no — not known until render | no — never parsed |
+| strict mode (missing / unused) | yes, before render | **yes**, at render | **no** — impossible in principle |
+| `response_schema` | **yes** | no | no |
+| provenance | no | no | **yes** |
+| available on `@promptstring_generator` | yes | yes | **no** |
+
+Three of those cells are the ones worth stating aloud:
+
+- **`response_schema` is unavailable outside owned-static.**
+  `_response_schema_from_hints` returns `None` for `str`, `Template`, and
+  `PromptSource`, and the latter two are exactly the annotations that select the
+  other two classes. So a user cannot have both a Jinja2-rendered prompt and a
+  typed response schema on one `@promptstring`. That is a real cost of D3, not a
+  detail, and this ADR does not fix it.
+- **Provenance exists only on the delegated path.** Both owned paths set
+  `provenance = None` unconditionally. The library's answer to VISION problem 2 is
+  therefore reachable only by returning a `PromptSource` — which is what makes D4
+  worth having rather than optional polish.
+- **Strict mode survives into owned-dynamic.** Only full delegation gives it up.
+  A user who wants an external template *and* strict checking has a middle option:
+  load the text, hand it to `parse_trusted_template`, and return the `Template`.
+  They trade provenance for strictness. Neither this ADR nor the code lets them
+  have both, and that trade should be documented rather than discovered.
 
 The `response_schema` exclusion is the sharp one: structured output is unavailable
 in delegated mode *by the same mechanism* that enables delegated mode. A user
@@ -219,17 +264,35 @@ def provenance_from_file(
 ) -> PromptSourceProvenance: ...
 ```
 
-- `source_id` is `str(path)` as given — not resolved to an absolute path, since an
-  absolute path is machine-specific and provenance must be comparable across
-  machines.
-- `hash` is `"sha256:" + sha256(file_bytes).hexdigest()`, over the **raw bytes**
-  with no newline normalisation. Fixing the algorithm and the encoding is the
-  point: a provenance hash that differs between machines is not provenance. The
-  `sha256:` prefix matches the format already used in the ADR 0007 examples.
+- `source_id` is `PurePath(path).as_posix()` — **not** `str(path)`, and not
+  resolved to an absolute path. Absolute paths are machine-specific, and
+  `str(path)` on Windows yields backslash separators, so the same template in the
+  same repository would produce different `source_id`s on different developers'
+  machines. That defeats the one property this helper exists to provide.
+- `hash` is `"sha256:" + sha256(file_bytes).hexdigest()` over the **raw bytes**.
+  Fixing the algorithm and the encoding is the point: a provenance hash that
+  differs between machines is not provenance. The `sha256:` prefix matches the
+  format already used in the ADR 0007 examples.
+
+  Raw bytes means **no newline normalisation**, which is a deliberate trade with a
+  cost: a repository checked out with `core.autocrlf=true` on Windows hashes
+  differently from the same commit on Linux. Normalising would hide a real
+  difference in what was sent to the model, so the hash stays byte-exact and the
+  cross-platform caveat is documented instead.
 - `version` is a parameter, not something the caller patches in afterwards. An
   earlier draft omitted it and told the caller to supply `version` separately,
   which would have meant a `dataclasses.replace()` at every call site — exactly
   the by-hand work this helper exists to remove.
+
+**Trust boundary.** `provenance_from_file` is the only code in the package that
+touches the filesystem, and the path comes from the caller. It reads the whole
+file to hash it, so a caller who passes a path they do not control has an
+unbounded read and follows symlinks. The helper does no validation: the path is
+caller-supplied and caller-trusted, the same posture the library takes toward
+resolver callables. That is a deliberate position, not an oversight, and it is
+stated so a reviewer can disagree with it. It also means the helper should not be
+called per-render on a hot path — it is a decoration-time or startup-time
+convenience.
 
 Pure stdlib (`hashlib`, `pathlib`); no template engine is imported. **Home
 module:** `types.py`, beside `PromptSourceProvenance` which it constructs. It is
@@ -267,14 +330,21 @@ class PromptSource:
 over every field. A plain `handle: Any = None` was verified to change all three:
 `hash(PromptSource("x", None, {"a": 1}))` raises `TypeError: unhashable type:
 'dict'` where the two-field version hashes fine, two renders of identical text
-compare unequal when different vendor objects ride along, and `repr()` and
-`dataclasses.asdict()` both leak the vendor object into logs and assertion diffs.
-With `compare=False, repr=False, hash=False` the field is genuinely inert.
+compare unequal when different vendor objects ride along, and `repr()` leaks the
+vendor object into logs and assertion diffs. With `compare=False, repr=False,
+hash=False` the field stops affecting equality, hashing, and repr.
+
+It is **not** fully inert, and the difference matters: `dataclasses.asdict()`
+still returns `handle`, because `field()` has no asdict exclusion. Verified. So
+the library's own repr is protected, while any third-party observer that runs
+`asdict()` on the event and ships the result to a vendor will carry the handle
+with it. At that boundary the discipline is a convention, not a mechanism.
 
 The `PromptContext.extras` precedent (ADR 0002 I-3) does **not** transfer
-unexamined: `extras` defaults to a `dict`, so `PromptContext` was never hashable
-and never had value equality. The discipline sentence was free there and is not
-free here.
+unexamined: `extras` defaults to a `dict`, so `PromptContext` is unhashable —
+`hash()` raises `TypeError`. (It does have value equality; an earlier draft
+claimed otherwise and that was wrong. Unhashability alone carries the argument.)
+The discipline sentence was free there and is not free here.
 
 **Discipline:** the library never reads, interprets, or enumerates `handle`; with
 the modifiers above it also never serialises it. It carries it and exposes it on
@@ -604,7 +674,8 @@ documented, not solved.
 **Pickle:** pickled instances embed the defining module, verified —
 `pickle.dumps(PromptRenderError("x"))` currently emits `promptstrings.core`. Old
 pickles keep loading through the shim, but pickles produced *after* the split
-cannot be loaded by 1.0.0–1.3.0. For mixed-version workers this is a genuine
+cannot be loaded by any released version (1.0.0–1.2.0, or a locally built 1.3.0).
+For mixed-version workers this is a genuine
 wire-format change. The precise claim is therefore: **no source-level break;
 pickle payload module paths change.**
 
@@ -797,7 +868,7 @@ Two clarifications an earlier draft got wrong:
 - The library still cannot show where render time goes internally (D6 residual).
 - Monkeypatch targets under `promptstrings.core` silently stop working (D9); no
   gate detects this.
-- Pickles produced after the split cannot be read by 1.0.0–1.3.0 (D9).
+- Pickles produced after the split cannot be read by any earlier version (D9).
 - Delegated mode remains unavailable on `@promptstring_generator`, and
   `response_schema` remains unavailable in delegated mode at all (D2). Both are
   named, neither is fixed here.
@@ -865,8 +936,33 @@ The seam results (D2–D7) rest on F4–F6 and F10–F11; the decomposition (D8�
 rests on F7–F9 and F12. All are tool-grounded and independently re-checkable, and
 re-running the F7 analysis against the split package is acceptance gate 7.
 
-This document was adversarially reviewed by four independent cold readers with no
-access to the reasoning that produced it. They found, and this version repairs:
+**Review state, stated exactly.** Eight cold adversarial passes were run against
+this document by readers with no access to the reasoning that produced it: six
+single-angle attacks (central claim; factual accuracy; implementability; contract
+preservation; internal coherence; usability as an instruction), one coverage
+audit, and one regression sweep. Every P0 and P1 they raised is repaired here, and
+the final regression sweep confirmed the load-bearing claims — seam count,
+decomposition, cycle break, compatibility — survive independent verification.
+
+The coverage audit nonetheless returned **INCOMPLETE**. It named sixteen
+defect-classes that the attacked angles would never probe, clustered in two
+regions: consequences this ADR does not model (security, performance,
+portability, rollback), and the lifecycle wrapper (SemVer and deprecation policy,
+decision rights, effort realism, communication plan, documentation-tooling
+surface, form hygiene, decision erosion). Two of the highest-value ones were
+addressed directly rather than by another pass — the trust boundary and
+cross-platform behaviour of `provenance_from_file`, the second of which turned up
+a real defect: `str(path)` would have produced different provenance on Windows,
+defeating the helper's only purpose.
+
+So: **the polish bar is not claimed as reached.** "Zero P0/P1" here means no cold
+reader found a must-fix or should-fix *on the angles attacked*, which is a
+narrower statement than "the document is sound." The residual coverage gap is
+listed above rather than closed, and a reviewer who wants the strongest remaining
+attack should start with security posture and the shim's deprecation lifetime,
+neither of which this ADR decides.
+
+The reviews found, and this version repairs:
 a false claim that owned and delegated prompts carry identical guarantees
 (`response_schema` and provenance both break the symmetry, and delegation does not
 exist for generators at all); a wrong file census; a module table that partitioned
@@ -875,9 +971,13 @@ grounding that tested asyncio primitives the library does not use; a
 `prompts`/`generators` boundary justified by a mechanism difference that does not
 exist; a `handle` field described as inert that would have changed hashing and
 equality; an amendment to a numbered Promise recorded as if it were a non-promise
-revision; and an acceptance gate naming a script that was never committed. One
-finding was **rejected** on checking: the claim that 1.3.0 is published on PyPI
-confused the version in `pyproject.toml` with the released one — PyPI carries
+revision; an acceptance gate naming a script that was never committed; a gate
+requiring byte-identical definitions that the cycle fix itself would violate; and
+a two-class prompt taxonomy that is actually three, because `-> Template` returns
+are still rendered and strict-checked by the library.
+
+One finding was **rejected** on checking: the claim that 1.3.0 is published on
+PyPI confused the version in `pyproject.toml` with the released one — PyPI carries
 1.0.0, 1.1.0, and 1.2.0, as stated.
 
 What remains *not* grounded is boundary placement. The graph proves which splits
