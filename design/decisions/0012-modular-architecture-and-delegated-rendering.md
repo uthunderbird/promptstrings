@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
-- **Target version:** 1.4.0 (module split, shipped 2026-07-27); `provenance_from_file` (D4) not yet implemented; D5 deferred
+- **Target version:** 1.3.0 — the split and `provenance_from_file` (D4) both ship in it, since 1.3.0 was built but never published. D5 deferred; generator delegation decided against.
 - **Deciders:** Daniyar Supiyev
 - **Supersedes:** retires ADR 0002 non-promise N-5. Full table in "Revisions to ADR 0002"
 - **Superseded by:** —

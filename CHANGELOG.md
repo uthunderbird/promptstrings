@@ -11,26 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > artifacts on PyPI is the original, incomplete one — those artifacts are immutable and were not
 > republished.
 
-## [Unreleased]
+## [1.3.0] - 2026-07-27
 
-### Changed
-- `core.py` is split into nine modules (ADR 0012): `errors`, `types`, `observability`,
-  `introspection`, `templates`, `resolution`, `prompts`, `generators`, `factory`. **No public
-  API change** — every name still imports from `promptstrings`, the split removed nothing from
-  `promptstrings.__all__`, and `promptstrings.core` remains as a shim re-exporting all 43
-  pre-split names. (`provenance_from_file` below is an addition by a separate decision, not by
-  the split.)
-  - Two caveats that are real but narrow. Re-export does not preserve monkeypatch targets:
-    `monkeypatch.setattr("promptstrings.core._render_static", ...)` no longer affects
-    rendering, because the library resolves that name in `promptstrings.templates`. And
-    pickles embed the defining module, so objects pickled after this change cannot be loaded
-    by 1.0.0–1.2.0.
-  - `promptstrings.core` no longer exposes the modules it happened to import
-    (`promptstrings.core.asyncio` and similar). That was incidental attribute leakage rather
-    than API.
-- A `@promptstring_generator` that yields a `PromptSource` now raises an error saying delegated
-  rendering is unsupported on that engine and what to do instead, rather than reporting an
-  unsupported yield type. The capability was never available; only the message changes.
+Three independent threads land together: template-composition safety (ADR 0011), the
+`core.py` module split (ADR 0012), and the examples infrastructure (ADR 0010). Nothing here
+removes or renames a public name; the split in particular is source-compatible, with two
+narrow caveats noted under Changed.
 
 ### Added
 - `provenance_from_file(path, *, source_id=None, version=None, provider_name=None)` (ADR 0012
@@ -51,10 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt, and `response_schema` is available only on the docstring path.
 - `tools/split_gate.py` and a captured pre-split baseline, so the split's acceptance gates are
   re-runnable rather than a one-off claim.
-
-## [1.3.0] - 2026-07-13
-
-### Added
 - Template composition is a supported first-class pattern (ADR 0011). Passing the result of
   `await inner.render(ctx)` as a parameter value to an outer prompt is safe: substituted values
   are never re-parsed as templates, on every render path combination (docstring × t-string ×
@@ -86,15 +68,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     debugging carve-out. Not a compatibility event: the previous repr embedded a memory
     address and so could never be asserted on stably.
 
-### Fixed
-- README: the dishka example did not compile. It used `{user.name}` as a placeholder, which the
-  `{identifier}`-only grammar rejects with `PromptCompileError`. It now resolves the attribute in
-  the resolver and interpolates a plain `{username}`.
-- README: the observer example defined `on_event`, which is not part of the `Observer` protocol
-  (`on_render_start` / `on_render_end` / `on_render_error`). An observer copied from the README
-  silently never fired. Both examples had been wrong since 1.0.0.
-
 ### Changed
+- `core.py` is split into nine modules (ADR 0012): `errors`, `types`, `observability`,
+  `introspection`, `templates`, `resolution`, `prompts`, `generators`, `factory`. **No public
+  API change** — every name still imports from `promptstrings`, the split removed nothing from
+  `promptstrings.__all__`, and `promptstrings.core` remains as a shim re-exporting all 43
+  pre-split names. (`provenance_from_file` under Added is a separate decision, not part of the
+  split.)
+  - Two caveats that are real but narrow. Re-export does not preserve monkeypatch targets:
+    `monkeypatch.setattr("promptstrings.core._render_static", ...)` no longer affects
+    rendering, because the library resolves that name in `promptstrings.templates`. And
+    pickles embed the defining module, so objects pickled after this change cannot be loaded
+    by 1.0.0–1.2.0.
+  - `promptstrings.core` no longer exposes the modules it happened to import
+    (`promptstrings.core.asyncio` and similar). That was incidental attribute leakage rather
+    than API.
+- A `@promptstring_generator` that yields a `PromptSource` now raises an error saying delegated
+  rendering is unsupported on that engine and what to do instead, rather than reporting an
+  unsupported yield type. The capability was never available; only the message changes.
 - Passing an unrendered promptstring (a `@promptstring` / `@promptstring_generator` object — i.e.
   a forgotten `await prompt.render(ctx)`) as a parameter value now raises `PromptRenderError`
   with an actionable message instead of silently rendering
@@ -108,6 +99,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `missing_key` is `None` on both raise sites: the parameter *was* resolved, so this is not a
     missing-key path (ADR 0003 field schema).
 
+### Fixed
+- README: the dishka example did not compile. It used `{user.name}` as a placeholder, which the
+  `{identifier}`-only grammar rejects with `PromptCompileError`. It now resolves the attribute in
+  the resolver and interpolates a plain `{username}`.
+- README: the observer example defined `on_event`, which is not part of the `Observer` protocol
+  (`on_render_start` / `on_render_end` / `on_render_error`). An observer copied from the README
+  silently never fired. Both examples had been wrong since 1.0.0.
 ## [1.2.0] - 2026-04-27
 
 ### Added
