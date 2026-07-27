@@ -21,7 +21,8 @@ supersedes the old one and update the old one's `Superseded by` field.
   documents shared-`PromptContext` naming discipline; adds composition example.
   Target version 1.3.0. Accepted 2026-04-27.
 - [0010 — Examples infrastructure](0010-examples-infrastructure.md)
-  — `examples/` directory with 12 numbered self-contained scripts, `FakeLLMClient` mock,
+  — `examples/` directory with 12 numbered self-contained scripts at acceptance
+  (ADR 0012 added a 13th), `FakeLLMClient` mock,
   `examples` optional-dependency group, and a dedicated CI job. Target version 1.3.0.
   Accepted 2026-04-27.
 - [0009 — `response_schema` property for structured output](0009-response-schema-property.md)
